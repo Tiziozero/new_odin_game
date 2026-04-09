@@ -1,0 +1,11 @@
+PLAYER_PATH=imgs/apple.png
+ENEMY1=imgs/banana.png
+ENEMY2=imgs/banana.png
+ENEMY3=imgs/banana.png
+ENEMY4=imgs/banana.png
+ENEMY5=imgs/banana.png
+ICON1=imgs/icon1.png
+ICON2=imgs/icon6.png
+ICON3=imgs/icon4.png
+ICON4=imgs/icon5.png
+TILES=imgs/tile.png
