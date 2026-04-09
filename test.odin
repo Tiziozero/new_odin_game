@@ -18,7 +18,7 @@ init_base :: proc(game:^ game, e: ^Entity, index: int) -> Ability {
         p.dir = raylib.Vector2Normalize(owner.direction);
         p.origin = rect_pos(owner.body) + 0.5 * rect_size(owner.body);
         p.pos = p.origin;
-        p.range = 200;
+        p.range = 750;
         p.radius = 2.0;
         p.speed = 800.0;
         p.damage = 5 + math.exp(f32(self.level)*0.2); // random?

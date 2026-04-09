@@ -1,15 +1,12 @@
+#+feature dynamic-literals
 package main
 
+import "core:time"
 import "core:mem"
 import "core:os"
 import "core:fmt"
 import "core:strings"
 import rl "vendor:raylib" 
-
-GameContext :: struct {
-    frame_arena: mem.Dynamic_Arena,
-    game: game,
-}
 
 vec2 :: rl.Vector2;
 rect :: rl.Rectangle;
@@ -23,6 +20,8 @@ rect_pos :: proc(r: rect) -> vec2 {
     return vec2{r.x, r.y};
 }
 game :: struct {
+    prints: bool,
+    config: GameConfig,
     current_handle: int,
     entities: map[int]Entity,
     mouse_pos: vec2,
@@ -31,10 +30,19 @@ game :: struct {
     dt: f32,
     textures: map[int]t2d,
     frame_arena: mem.Dynamic_Arena,
+    logs_arena: mem.Dynamic_Arena,
+    logs :[dynamic]Log,
     projectiles :[dynamic]Projectile,
     effects :[dynamic]Effect,
-    collisions: [dynamic]struct{handle: int, dist: f32}
+    collisions: [dynamic]struct{handle: int, dist: f32},
+
+    // for player control
+    player_velocity: rl.Vector2,
 };
+Log :: struct {
+    time: time.Time,
+    msg: string,
+}
 
 game_add_projectile :: proc(game: ^game, p: ^Projectile) {
     p.active = 1;
@@ -144,7 +152,13 @@ game_new ::proc() -> game {
     g.entities = map[int]Entity{};
     g.textures = map[int]t2d{};
     g.current_handle = 0;
+    mem.dynamic_arena_init(&g.logs_arena);
+    mem.dynamic_arena_init(&g.frame_arena);
     return g;
+}
+game_loop :: proc(game: ^game) {
+    game.player_velocity= vec2{0,0};
+    mem.dynamic_arena_reset(&game.frame_arena);
 }
 game_free :: proc(game: ^game) {
     for l, v in game.textures {
@@ -252,7 +266,69 @@ game_damage_entity :: proc(game: ^ game, handle: int, damage: Damage) {
         game_remove_entity(game, handle);
     }
 }
+InputHandler :: struct {
+    action: proc(game: ^game),
+}
+GameConfig :: struct {
+    // ui keys
+    ui_input: map[rl.KeyboardKey]InputHandler
+}
+InputEventKind :: enum {
+    IE_CLICK,
+    IE_KEY_PRESSED,
+    IE_KEY_DOWN,
+    IE_MB_PRESSED, // mouse button
+    IE_MB_DOWN,
+};
+InputEvent :: struct {
+    kind : InputEventKind,
+    k : rl.KeyboardKey,
+    mb : rl.MouseButton,
+    click: rl.Vector2,
+}
+rl_to_game :: proc(events: ^[dynamic]InputEvent) {
+    clear(events);
+    // Keyboard
+    for keyc := 0; keyc < 348; keyc += 1 {
+        k := rl.KeyboardKey(keyc);
 
+        if rl.IsKeyPressed(k) {
+            append(events, InputEvent{
+                kind = .IE_KEY_PRESSED,
+                k    = k,
+            });
+        }
+
+        if rl.IsKeyDown(k) {
+            append(events, InputEvent{
+                kind = .IE_KEY_DOWN,
+                k    = k,
+            });
+        }
+    }
+
+    // Mouse buttons to check
+    buttons := [?]rl.MouseButton{.LEFT, .RIGHT, .MIDDLE};
+
+    for mb in buttons {
+        // Pressed (click)
+        if rl.IsMouseButtonPressed(mb) {
+            append(events, InputEvent{
+                kind  = .IE_MB_PRESSED,
+                mb    = mb,
+                click = rl.GetMousePosition(),
+            });
+        }
+
+        // Held
+        if rl.IsMouseButtonDown(mb) {
+            append(events, InputEvent{
+                kind = .IE_MB_DOWN,
+                mb   = mb,
+            });
+        }
+    }
+}
 game_get_entity_line_collisions :: proc(game:^ game, p1, p2: rl.Vector2) -> [dynamic]struct{handle: int, dist: f32} {
     clear(&game.collisions);
     for k, e in game.entities {
@@ -279,10 +355,24 @@ main :: proc() {
     fmt.println("Hellp, World loop!");
     // init game/ctx
     rl.InitWindow(1200,900, "Entricity");
+    rl.SetExitKey(.KEY_NULL);
     defer rl.CloseWindow();
     rl.SetTargetFPS(60);
+    // game config
+    gc : GameConfig;
+    gc.ui_input = map[rl.KeyboardKey]InputHandler{
+        // escape closes window
+        .ESCAPE=InputHandler{action=proc(game: ^game){
+            fmt.println("Close window called via exit.");
+            rl.CloseWindow();
+        }},
+        .P=InputHandler{action=proc(game: ^game){
+            game.prints = false;
+        }},
+    };
 
     game := game_new();
+    game.config = gc;
 
     player_tx_handle := game_load_texture(&game, "imgs/apple.png");
     player := entity_new(player_tx_handle, 100, 100, 80, 80, 65, 100, 5);
@@ -302,45 +392,51 @@ main :: proc() {
     };
     enemy1_handle := game_add_entity(&game, &enemy1);
 
-   // player abilities
-   {
+    // player abilities
+    {
         p := &game.entities[player_handle];
-        a: Ability = init_base(&game, p, 0);
-        a.active = 1;
-        p.abilities[0] = a;
-   }
-
-    handle_player_input :: proc(game: ^game, p: ^Entity, dt: f32) {
-        pv: vec2;
-        if rl.IsKeyDown(.A) {
-            pv.x -= 1;
-        }
-        if rl.IsKeyDown(.D) {
-            pv.x += 1;
-        }
-        if rl.IsKeyDown(.W) {
-            pv.y -= 1;
-        }
-        if rl.IsKeyDown(.S) {
-            pv.y += 1;
-        }
-        if rl.IsKeyPressed(.SPACE) {
-            entity_ability_act(game, p, 0);
-        }
-        if rl.IsMouseButtonPressed(.LEFT) {
-            entity_ability_act(game, p, 0);
-        }
-
-        pv = rl.Vector2Normalize(pv);
-        p.body.x += pv.x * p.speed * dt;
-        p.body.y += pv.y * p.speed * dt;
-        // set direction
-        player_center_screen_pos := apply_camera(game,
-                                      rect_pos(p.body) + 0.5* rect_size(p.body));
-        mp := rl.GetMousePosition();
-        d := rl.Vector2Normalize(mp - player_center_screen_pos);
-        p.direction = d;
+           a: Ability = init_base(&game, p, 0);
+              a.active = 1;
+              p.abilities[0] = a;
     }
+
+    handle_game_input :: proc(e: InputEvent, game: ^game) {
+        // game first, then player
+        if e.kind == .IE_KEY_PRESSED {
+            if handler, ok := &game.config.ui_input[e.k]; ok {
+                handler.action(game);
+            } else {
+                fmt.println("No action found for key", e.k);
+            }
+        }
+        handle_player_input(e, game, &game.entities[game.player_handle], game.dt);
+    }
+    handle_player_input :: proc(e: InputEvent, game: ^game, p: ^Entity, dt: f32) {
+        if e.kind == .IE_KEY_DOWN {
+            if e.k == .A {
+                game.player_velocity.x -= 1;
+            }
+            if e.k == .D {
+                game.player_velocity.x += 1;
+            }
+            if e.k == .W {
+                game.player_velocity.y -= 1;
+            }
+            if e.k == .S {
+                game.player_velocity.y += 1;
+            }
+        } else if e.kind == .IE_KEY_PRESSED {
+            if e.k == .SPACE {
+                entity_ability_act(game, p, 0);
+            }
+        } else if e.kind == .IE_MB_PRESSED {
+            if e.mb == .LEFT {
+                entity_ability_act(game, p, 0);
+            }
+        }
+
+    }
+    events: [dynamic]InputEvent;
     for !rl.WindowShouldClose() {
         {
             player := game.entities[player_handle];
@@ -355,8 +451,23 @@ main :: proc() {
         }
         // get dt
         game.dt = get_dt();
-        // handle player input
-        handle_player_input(&game, &game.entities[player_handle], game.dt);
+        // handle input
+        rl_to_game(&events);
+        for e in events {
+            handle_game_input(e, &game);
+        }
+        { // update player
+            p := &game.entities[game.player_handle];
+            pv := rl.Vector2Normalize(game.player_velocity);
+            p.body.x += pv.x * p.speed * game.dt;
+            p.body.y += pv.y * p.speed * game.dt;
+            // set direction
+            player_center_screen_pos := apply_camera(&game,
+                    rect_pos(p.body) + 0.5* rect_size(p.body));
+            mp := rl.GetMousePosition();
+            d := rl.Vector2Normalize(mp - player_center_screen_pos);
+            p.direction = d;
+        }
         // update entities
         for handle, e in game.entities {
             e.update(&game, handle);
@@ -411,6 +522,7 @@ main :: proc() {
         delete(cstr);
         
         rl.EndDrawing();
+        game_loop(&game);
         draw_entities_sorted(&game);
     }
 
