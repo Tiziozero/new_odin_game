@@ -1,6 +1,8 @@
 #+feature dynamic-literals
 package main
 
+CELLS := 80;
+
 import "core:time"
 import "core:mem"
 import "core:os"
@@ -33,9 +35,10 @@ MapInteractable :: struct {
     // zone for interacting
     body, zone: rl.Rectangle,
 };
+Vec2i :: struct { x, y: int };
 Map :: struct {
     interactables: map[int]MapInteractable,
-    walls: [dynamic]Wall,
+    chunks: map[Vec2i]MapChunk,
 }
 game :: struct {
     wmap: Map,
@@ -213,6 +216,7 @@ game_free :: proc(game: ^game) {
 
     // config
     delete(game.config.ui_input);
+    fmt.printfln("freed game.");
 }
 draw_entities_sorted :: proc(game: ^game, allocator := context.allocator) {
     handles := make([]int, len(game.entities), allocator)
@@ -411,18 +415,88 @@ game_log :: proc(game: ^game, fmt_str: string, args: ..any) {
 
 get_map :: proc() -> Map {
     m: Map;
-    w: Wall;
-    w.body.x = 400;
-    w.body.y = 400;
-    w.body.width = 100;
-    w.body.height = 100;
-    w.color = rl.BLACK;
-    append(&m.walls, w);
     return m;
 }
-entity_wall_collision :: proc(body, wall: rl.Rectangle) -> (bool, rl.Vector2) {
+/*
+The key insight is push out on the shallowest overlap axis — if you're barely clipping a wall on the left but deeply overlapping on the top, you're hitting the side, not the top. Resolving the smaller overlap is almost always correct.
+   */
+entity_wall_collision :: proc(body, wall: ^rl.Rectangle) -> bool {
+    // horizontal overlap
+        if !rl.CheckCollisionRecs(body^, wall^) do return false;
 
-    return false, rl.Vector2{0,0};
+            // compute overlap on each axis
+            overlap_x := min(body.x + body.width,  wall.x + wall.width)  - max(body.x, wall.x)
+            overlap_y := min(body.y + body.height, wall.y + wall.height) - max(body.y, wall.y)
+
+            // push out on shallowest axis
+            if overlap_x < overlap_y {
+                if body.x < wall.x {
+                    body.x -= overlap_x
+                } else {
+                    body.x += overlap_x
+                }
+            } else {
+                if body.y < wall.y {
+                    body.y -= overlap_y
+                } else {
+                    body.y += overlap_y
+                }
+            }
+    return true;
+}
+draw_bg :: proc(game: ^game) {
+    f :f32 = f32(CELLS)/f32(cells); // scale factor
+    p := &game.entities[game.player_handle];
+    // draw walls
+    cx := int(p.body.x/f32(CHUNK_SIZE*CELLS));
+    cy := int(p.body.y/f32(CHUNK_SIZE*CELLS));
+    // get chunks around it
+    for i in cx-2..=cx+2 {
+        for j in cy-2..=cy+2 {
+            chunk, ok := game.wmap.chunks[{i, j}];
+            tiles := chunk.tiles;
+            for x in 0..<CHUNK_SIZE {
+                for y in 0..<CHUNK_SIZE {
+                    xp := f32(i*CHUNK_SIZE*CELLS + x* CELLS) // get tile x/y pos
+                    yp := f32(j*CHUNK_SIZE*CELLS + y* CELLS)
+                    cam_pos := apply_camera(game, rl.Vector2{xp, yp});
+                    if cam_pos.x + f32(CELLS) < 0 ||
+                        cam_pos.x  > game.camera.width {
+                            continue;
+                    }
+                    if cam_pos.y + f32(CELLS) < 0 ||
+                        cam_pos.y > game.camera.height {
+                            continue;
+                    }
+                    color : rl.Color;
+                    c := tiles[y*CHUNK_SIZE+x].c;
+                    if c == 1 {
+                        color = rl.WHITE
+                    } else if c == 2 {
+                        color = rl.RED
+                    } else if c == 0 {
+                        color = rl.BLUE
+                    }
+                    rl.DrawRectangleV(cam_pos, rl.Vector2{f32(CELLS), f32(CELLS)},color);
+                }
+            }
+
+            walls := chunk.walls;
+            for w in walls {
+                cam_pos := apply_camera(game, rect_pos(w.body));
+                if cam_pos.x + w.body.width < 0 ||
+                    cam_pos.x  > game.camera.width {
+                        continue;
+                    }
+                if cam_pos.y + w.body.height < 0 ||
+                    cam_pos.y > game.camera.height {
+                        continue;
+                }
+                fmt.println("Drawing wall", cam_pos, w.color);
+                rl.DrawRectangleV(cam_pos, rect_size(w.body), w.color);
+            }
+        }
+    }
 }
 // isometric fn: I(x,y)=((x-y)/\sqrt{2},(x+y)/(\sqrt{2}*k))
 // for future bs
@@ -536,17 +610,43 @@ main :: proc() {
         for e in events {
             handle_game_input(e, &game);
         }
-        { // update player
+        { // update player TODO: make more efficient, someday maybe
             p := &game.entities[game.player_handle];
-            pv := rl.Vector2Normalize(game.player_velocity);
-            p.body.x += pv.x * p.speed * game.dt;
-            p.body.y += pv.y * p.speed * game.dt;
-            // set direction
             player_center_screen_pos := apply_camera(&game,
-                    rect_pos(p.body) + 0.5* rect_size(p.body));
+                                      rect_pos(p.body) + 0.5* rect_size(p.body));
             mp := rl.GetMousePosition();
             d := rl.Vector2Normalize(mp - player_center_screen_pos);
             p.direction = d;
+            if game.player_velocity.x == 0 && game.player_velocity.y == 0 {
+            } else {
+                pv := rl.Vector2Normalize(game.player_velocity);
+                p.body.x += pv.x * p.speed * game.dt;
+                p.body.y += pv.y * p.speed * game.dt;
+                // set direction
+                cx := int(p.body.x/f32((CHUNK_SIZE*CELLS)));
+                cy := int(p.body.y/f32((CHUNK_SIZE*CELLS)));
+                // fmt.println("cx cy:", cx, cy, p.body.x, p.body.y);
+                // get chunks around it
+                for i in cx-2..=cx+2 {
+                    for j in cy-2..=cy+2 {
+                        _, ok := game.wmap.chunks[{i, j}];
+                        if !ok {
+                            c := gen_chunck(&game.wmap, i, j);
+                            game.wmap.chunks[{i, j}] = c;
+                        }
+                    }
+                }
+                chunk:= game.wmap.chunks[{cx, cy}];
+                // check collisions  in all 9 chunks around player
+                for i in cx-1..=cx+1 {
+                    for j in cy-1..=cy+1 {
+                        walls := game.wmap.chunks[{i, j}].walls;
+                        for &w in walls {
+                               entity_wall_collision(&p.body, &w.body);
+                        }
+                    }
+                }
+            }
         }
         // update entities
         for handle in game.entities {
@@ -573,31 +673,7 @@ main :: proc() {
 
         rl.BeginDrawing();
         rl.ClearBackground(rl.BLACK);
-        { // draw bg
-            f :f32 = 5; // scale factor
-            player := game.entities[player_handle];
-            px: = int(player.body.x / (cells*f)); // multiply cells by factor
-            py: = int(player.body.y / (cells*f));
-            range := 10
-            for i in px-range..=px+range {
-                for j in py-range..=py+range {
-                    get_draw_tile_f(&game, i, j, f);
-                }
-            }
-            // draw walls
-            for w in game.wmap.walls {
-                cam_pos := apply_camera(&game, rect_pos(w.body));
-                if cam_pos.x + w.body.width < 0 ||
-                    cam_pos.x  > game.camera.width {
-                        continue;
-                    }
-                if cam_pos.y + w.body.height < 0 ||
-                    cam_pos.y > game.camera.height {
-                        continue;
-                }
-                rl.DrawRectangleV(cam_pos, rect_size(w.body), w.color);
-            }
-        }
+        draw_bg(&game);
         // draw entities
         // draw_entities_sorted(&game);
         for k, e in game.entities {
@@ -616,6 +692,7 @@ main :: proc() {
             len(game.entities),
             len(game.projectiles));
         s := strings.to_cstring(&game.dbg_sb);
+        rl.DrawRectangle(0,0,200,900, rl.Color{75,75,75,200});
         rl.DrawText(s, 10, 40, 20, rl.BLACK);
         rl.EndDrawing();
         game_loop(&game);
