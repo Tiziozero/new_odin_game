@@ -9,7 +9,8 @@ AbilityHandler :: proc(game: ^game, self: ^Ability, owner: ^Entity);
 Ability :: struct {
     active, index, owner, level: int, // it's index in the enities ablity
     cooldown, cooldown_time, cost: f32,
-    init, act: AbilityHandler,
+    // update per frame, for cooldown, levels etc
+    init, update, act: AbilityHandler,
 };
 
 

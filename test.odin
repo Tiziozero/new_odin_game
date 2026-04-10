@@ -12,6 +12,10 @@ init_base :: proc(game:^ game, e: ^Entity, index: int) -> Ability {
     a :Ability;
     a.owner = e.handle;
     a.act = proc(game: ^game,  self: ^Ability, owner: ^Entity) {
+        if self.cooldown > 0 {
+            fmt.println("ablity cooldown", self.cooldown);
+            return;
+        }
         fmt.println("Act called.");
         p: Projectile;
         p.kind = .PkBase;
@@ -67,9 +71,15 @@ init_base :: proc(game:^ game, e: ^Entity, index: int) -> Ability {
             }
             raylib.DrawCircleV(cam_pos, self.radius, raylib.BLACK);
         }
+        self.cooldown = self.cooldown_time; // set to time
+        fmt.println("cooldown,", self.cooldown, self.cooldown_time);
         game_add_projectile(game, &p);
     }
+    a.update = proc(game: ^game,  self: ^Ability, owner: ^Entity) {
+        self.cooldown -= game.dt;
+        if self.cooldown_time < 0 { self.cooldown = 0; }
+    }
 
-    a.cooldown_time = 1;
+    a.cooldown_time = 0.5;
     return a;
 }

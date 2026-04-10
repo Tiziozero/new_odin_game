@@ -19,7 +19,26 @@ rect_size :: proc(r: rect) -> vec2 {
 rect_pos :: proc(r: rect) -> vec2 {
     return vec2{r.x, r.y};
 }
+
+
+ItemKind :: enum {
+    IkSpell, // spells?
+};
+
+Item :: struct {
+    kind: ItemKind,
+    has_ability: bool
+};
+MapInteractable :: struct {
+    // zone for interacting
+    body, zone: rl.Rectangle,
+};
+Map :: struct {
+    interactables: map[int]MapInteractable,
+    walls: [dynamic]Wall,
+}
 game :: struct {
+    wmap: Map,
     prints: bool,
     config: GameConfig,
     current_handle: int,
@@ -36,12 +55,19 @@ game :: struct {
     effects :[dynamic]Effect,
     collisions: [dynamic]struct{handle: int, dist: f32},
 
+    dbg_sb: strings.Builder,
     // for player control
     player_velocity: rl.Vector2,
+    ability_slots: [5]Item,
+    items :[40]Item,
 };
 Log :: struct {
     time: time.Time,
     msg: string,
+}
+Wall :: struct {
+    body: rl.Rectangle,
+    color: rl.Color
 }
 
 game_add_projectile :: proc(game: ^game, p: ^Projectile) {
@@ -83,7 +109,7 @@ Entity :: struct {
     atk, def, health, max_health, speed: f32,
     payload: rawptr,
     update, draw: EntityHandler,
-    abilities: [5]Ability
+    abilities: [5]Ability // for entities and what not?
 }
 get_env :: proc(s: string) -> string {
     ret := os.get_env(s, context.allocator);
@@ -149,23 +175,44 @@ game_remove_entity :: proc(game: ^game, handle: int) -> int {
 }
 game_new ::proc() -> game {
     g : game;
+    g.wmap = get_map();
     g.entities = map[int]Entity{};
     g.textures = map[int]t2d{};
     g.current_handle = 0;
     mem.dynamic_arena_init(&g.logs_arena);
     mem.dynamic_arena_init(&g.frame_arena);
+    strings.builder_init(&g.dbg_sb, g.frame_arena.block_allocator);
     return g;
 }
 game_loop :: proc(game: ^game) {
     game.player_velocity= vec2{0,0};
+    strings.builder_reset(&game.dbg_sb);
     mem.dynamic_arena_reset(&game.frame_arena);
 }
 game_free :: proc(game: ^game) {
-    for l, v in game.textures {
+    // textures
+    for _, v in game.textures {
         rl.UnloadTexture(v);
     }
-    delete(game.entities);
     delete(game.textures);
+    delete(game.entities);
+
+    // dynamic arrays
+    delete(game.logs);
+    delete(game.projectiles);
+    delete(game.effects);
+    delete(game.collisions);
+
+    // arenas (these free all their blocks)
+    mem.dynamic_arena_destroy(&game.frame_arena);
+    mem.dynamic_arena_destroy(&game.logs_arena);
+
+    // builders backed by arenas are already freed above,
+    // but reset the builder metadata
+    strings.builder_destroy(&game.dbg_sb);
+
+    // config
+    delete(game.config.ui_input);
 }
 draw_entities_sorted :: proc(game: ^game, allocator := context.allocator) {
     handles := make([]int, len(game.entities), allocator)
@@ -190,6 +237,7 @@ draw_entities_sorted :: proc(game: ^game, allocator := context.allocator) {
             draw_entity(game, e)
         }
     }
+    delete(handles);
 }
 get_dt :: proc() -> f32 {
     return f32(rl.GetFrameTime())
@@ -247,8 +295,8 @@ entity_ability_act :: proc(game: ^game, e: ^Entity, index: int) {
         fmt.printfln("ability %d is inactive.", index);
         return;
     }
-    ability := e.abilities[index];
-    ability.act(game, &ability, e);
+    ability := &e.abilities[index];
+    ability.act(game, ability, e);
 }
 // define later
 Damage :: f32;
@@ -343,7 +391,39 @@ game_get_entity_line_collisions :: proc(game:^ game, p1, p2: rl.Vector2) -> [dyn
     }
     return game.collisions;
 }
+game_dbg :: proc(game: ^game, fmt_str: string, args: ..any) {
+    fmt.sbprintfln(&game.dbg_sb, fmt_str, ..args);
+    buf: [time.MIN_HMS_LEN]u8
+}
+game_log :: proc(game: ^game, fmt_str: string, args: ..any) {
+    l: Log
+    sb: strings.Builder
+    strings.builder_init(&sb, game.logs_arena.block_allocator)
 
+    buf: [time.MIN_HMS_LEN]u8
+    ts := time.time_to_string_hms(time.now(), buf[:])
+    fmt.sbprintf(&sb, "%s ", ts)
+    fmt.sbprintf(&sb, fmt_str, ..args)
+
+    l.msg = strings.to_string(sb)
+    append(&game.logs, l)
+}
+
+get_map :: proc() -> Map {
+    m: Map;
+    w: Wall;
+    w.body.x = 400;
+    w.body.y = 400;
+    w.body.width = 100;
+    w.body.height = 100;
+    w.color = rl.BLACK;
+    append(&m.walls, w);
+    return m;
+}
+entity_wall_collision :: proc(body, wall: rl.Rectangle) -> (bool, rl.Vector2) {
+
+    return false, rl.Vector2{0,0};
+}
 // isometric fn: I(x,y)=((x-y)/\sqrt{2},(x+y)/(\sqrt{2}*k))
 // for future bs
 main :: proc() {
@@ -469,8 +549,16 @@ main :: proc() {
             p.direction = d;
         }
         // update entities
-        for handle, e in game.entities {
-            e.update(&game, handle);
+        for handle in game.entities {
+            e := &game.entities[handle]
+            // upadate ailities first.
+            for i in 0..<len(e.abilities) {
+                a := &e.abilities[i];
+                if a.active == 0 {
+                    continue;
+                }
+                a.update(&game, a, e);
+            }
         }
         // update projectiles - p needs to be a reference
         inactive_p := 0;
@@ -496,10 +584,24 @@ main :: proc() {
                     get_draw_tile_f(&game, i, j, f);
                 }
             }
+            // draw walls
+            for w in game.wmap.walls {
+                cam_pos := apply_camera(&game, rect_pos(w.body));
+                if cam_pos.x + w.body.width < 0 ||
+                    cam_pos.x  > game.camera.width {
+                        continue;
+                    }
+                if cam_pos.y + w.body.height < 0 ||
+                    cam_pos.y > game.camera.height {
+                        continue;
+                }
+                rl.DrawRectangleV(cam_pos, rect_size(w.body), w.color);
+            }
         }
         // draw entities
-        for handle, e in game.entities {
-            e.draw(&game, handle);
+        // draw_entities_sorted(&game);
+        for k, e in game.entities {
+            e.draw(&game, k);
         }
         // draw projectiles
         for i in 0..<len(game.projectiles) {
@@ -509,22 +611,15 @@ main :: proc() {
             }
         }
         rl.DrawFPS(10,10);
-        sb : strings.Builder;
-        strings.builder_init(&sb);
-        fmt.sbprintfln(&sb,
-            "dt:\t%f", game.dt);
-        fmt.sbprintfln(&sb,
-            "entities:\t%d", len(game.entities));
-        fmt.sbprintfln(&sb,
-            "projectiles:\t%d", len(game.projectiles));
-        cstr := strings.unsafe_to_cstring(&sb);
-        rl.DrawText(cstr, 10, 40, 20, rl.BLACK);
-        delete(cstr);
-        
+        game_dbg(&game, "dt:\t%f\nentities:\t%d\nprojectiles:\t%d",
+            game.dt,
+            len(game.entities),
+            len(game.projectiles));
+        s := strings.to_cstring(&game.dbg_sb);
+        rl.DrawText(s, 10, 40, 20, rl.BLACK);
         rl.EndDrawing();
         game_loop(&game);
-        draw_entities_sorted(&game);
     }
-
     game_free(&game);
+    delete(events);
 }
