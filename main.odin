@@ -502,7 +502,9 @@ draw_bg :: proc(game: ^game) {
 // isometric fn: I(x,y)=((x-y)/\sqrt{2},(x+y)/(\sqrt{2}*k))
 // for future bs
 main :: proc() {
-    networking.nmain()
+    if networking.nmain() != 0 {
+        return
+    }
     // a = 1.1 - 1.7 seems to be ok-sih? defo rework. lower number are awkward
     for i in 0..=100 {
         fmt.printfln(" === %3d === %10f", i, scale_damage(f32(i),100,5, 104_420, 1.7));
