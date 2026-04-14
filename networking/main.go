@@ -5,80 +5,131 @@ import (
 	"math"
 	"net"
 )
+import (
+    "encoding/binary"
+)
 
 type Server struct {
 };
 
 type User struct {
+    id int32
+    // curent state
+    x, y, w, h float32
+    r, g, b, a float32 // color
+}
+
+type server_error struct {
+    s string
+}
+func (s *server_error)Error() string {
+    return s.s
+}
+
+func (u *User)update(data []byte) error {
+    if len(data) < 8 * 4 { // all 8 fields
+            log.Fatalf("Need at 4*8 (32) bytes, got %d.", len(data));
+            return &server_error{"Got less than 4*8 (32) bytes"};
+    }
+    u.x = ReadF32(data)
+    data = data[4:]
+    u.y = ReadF32(data)
+    data = data[4:]
+    u.w = ReadF32(data)
+    data = data[4:]
+    u.h = ReadF32(data)
+    data = data[4:]
+    u.r = ReadF32(data)
+    data = data[4:]
+    u.g = ReadF32(data)
+    data = data[4:]
+    u.b = ReadF32(data)
+    data = data[4:]
+    u.a = ReadF32(data)
+    data = data[4:]
+    return nil
+}
+// x y w h r g b a
+func (u *User)dump(data *[]byte) {
+    delta := make([]byte, 0);
+    WriteI32(delta, u.id);
+    WriteF32(delta, u.x);
+    WriteF32(delta, u.y);
+    WriteF32(delta, u.w);
+    WriteF32(delta, u.h);
+    WriteF32(delta, u.r);
+    WriteF32(delta, u.g);
+    WriteF32(delta, u.b);
+    WriteF32(delta, u.a);
+    *data = append(*data, delta...);
 }
 
 
-func readI16(msg []byte) (int16, bool) {
-    if len(msg) < 2 {
-        return 0, false
-    }
+func ReadU8(b []byte) uint8 {
+    return b[0]
 
-    v := int16(msg[0]) |
-         int16(msg[1])<<8 |
-         int16(msg[2])<<16 |
-         int16(msg[3])<<24
-    msg = msg[2:]
-    return v, true
 }
-func readI32(msg []byte) (int32, bool) {
-    if len(msg) < 4 {
-        return 0, false
-    }
-    v := int32(msg[0]) |
-         int32(msg[1])<<8 |
-         int32(msg[2])<<32 |
-         int32(msg[3])<<24
-    msg = msg[4:]
-    return v, true
-}
-func readU8(msg []byte) (uint8, bool) {
-    v := uint8(msg[0])
-    return v, true;
-}
-func readU32(msg []byte) (uint32, bool) {
-    if len(msg) < 4 {
-        return 0, false
-    }
-    v := uint32(msg[0]) |
-         uint32(msg[1])<<8 |
-         uint32(msg[2])<<32 |
-         uint32(msg[3])<<24
-    msg = msg[4:]
-    return v, true
-}
-func readF32(msg []byte) (float32, bool) {
-    v, ok := readU32(msg);
-    if !ok {
-        log.Fatal("Failed to parse u32 for read f32");
-        return 0, false
-    }
-    return math.Float32frombits(v), true
-}
-func writeU32LE(buf *[]byte, v uint32) {
-    *buf = append(*buf,
-        byte(v),
-        byte(v>>8),
-        byte(v>>16),
-        byte(v>>24),
-    )
-}
-func writeI32LE(buf *[]byte, v int32) {
-    writeU32LE(buf, uint32(v))
-}
-func writeF32LE(buf *[]byte, v float32) {
-    bits := math.Float32bits(v)
 
-    *buf = append(*buf,
-        byte(bits),
-        byte(bits>>8),
-        byte(bits>>16),
-        byte(bits>>24),
-    )
+
+func WriteU8(b []byte, v uint8) {
+    b[0] = v
+
+}
+
+
+func ReadU8At(b []byte, off int) (uint8, int) {
+    return b[off], off + 1
+
+}
+
+
+func WriteU8At(b []byte, off int, v uint8) int {
+    b[off] = v
+    return off + 1
+}
+// ---- i32 ----
+
+func ReadI32(b []byte) int32 {
+    return int32(binary.LittleEndian.Uint32(b))
+}
+
+
+func WriteI32(b []byte, v int32) {
+    binary.LittleEndian.PutUint32(b, uint32(v))
+}
+
+// ---- f32 ----
+
+func ReadF32(b []byte) float32 {
+    bits := binary.LittleEndian.Uint32(b)
+    return math.Float32frombits(bits)
+}
+
+func WriteF32(b []byte, v float32) {
+    binary.LittleEndian.PutUint32(b, math.Float32bits(v))
+}
+
+
+// ---- offset variants (advance a cursor) ----
+
+func ReadI32At(b []byte, off int) (int32, int) {
+    return ReadI32(b[off:]), off + 4
+}
+
+func WriteI32At(b []byte, off int, v int32) int {
+    WriteI32(b[off:], v)
+    return off + 4
+}
+
+func ReadF32At(b []byte, off int) (float32, int) {
+    return ReadF32(b[off:]), off + 4
+}
+
+func WriteF32At(b []byte, off int, v float32) int {
+
+    WriteF32(b[off:], v)
+
+    return off + 4
 }
 func main() {
     log.Println("Hello from Golang!");
@@ -103,15 +154,9 @@ func main() {
         }
         log.Printf("Read %d bytes into b, %d into oob\n", n, oobn)
         b = b[:n]
-        msg_kind, ok := readU8(b);
-        if !ok {
-            log.Fatal("Failed to read message kind");
-        }
+        msg_kind := ReadU8(b);
         if msg_kind == 1 { // connect request
-            id, ok := readU32(b);
-            if !ok {
-                log.Fatal("Failed to read user id from message");
-            }
+            id := ReadI32(b);
             users[int(id)] = User{};
             sent_count, _, err :=
                     listener.WriteMsgUDP([]byte("ok_connect"),
@@ -129,6 +174,8 @@ func main() {
                 log.Fatal(err)
             }
             log.Println("Wrote bytes", sent_count)
+        } else if msg_kind == 3 { // update
+            
         } else {
             log.Printf("Unhandled message kind %d\n", msg_kind)
         }

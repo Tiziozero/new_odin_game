@@ -8,59 +8,133 @@ MSG_INDICIES :: u8;
 MSG_CONNECT :: 1;
 MSG_DATA :: 2;
 Entity :: struct {
-    id: u64,
-    a, b, c, d: int,
-    e, f, g, h: f32,
+    id: i32,
+    x, y, w, h,
+    r, g, b, a: f32
 };
 
-read_i16 :: proc(msg: ^[]byte) -> i16 {
-    if len(msg) < 2 {
-        panic("msg len less thatn 2 when expected 2 for i16.");
-    }
-    n := (cast(^i16)&msg^[0])^
-    msg^ = msg^[2:]
-    return n;
+dump_user :: proc(u: Entity, data: ^[dynamic]byte) {
+    append_i32(data, u.id);
+    append_f32(data, u.x);
+    append_f32(data, u.y);
+    append_f32(data, u.w);
+    append_f32(data, u.h);
+    append_f32(data, u.r);
+    append_f32(data, u.g);
+    append_f32(data, u.b);
+    append_f32(data, u.a);
 }
-read_i32 :: proc(msg: ^[]byte) -> i32 {
-    if len(msg) < 4 {
-        panic("msg len less thatn 4 when expected 4 for i32.");
-    }
-    n := (cast(^i32)&msg^[0])^
-    msg^ = msg^[4:]
-    return n;
-}
-read_f32 :: proc(msg: ^[]byte) -> f32 {
-    if len(msg) < 4 {
-        panic("msg len less thatn 4 when expected 4 for f32.");
-    }
-    n := (cast(^f32)&msg^[0])^
-    msg^ = msg^[4:]
-    return n;
-}
-// for writers need dynamic?
-write_u8 :: proc(buf: ^[dynamic]u8, v: u8) {
-    append(buf, u8(v))
-}
-write_i8 :: proc(buf: ^[dynamic]u8, v: i8) {
-    append(buf, u8(v))
-}
-write_u32 :: proc(buf: ^[dynamic]u8, v: u32) {
-    append(buf, u8(v))
-    append(buf, u8(v >> 8))
-    append(buf, u8(v >> 16))
-    append(buf, u8(v >> 24))
+load_user :: proc(u: ^Entity, data: ^[]byte) {
+    assert(len(data) > 4*8);
+    u.x = read_f32(data^)
+    data^ = data^[4:]
+    u.y = read_f32(data^)
+    data^ = data^[4:]
+    u.w = read_f32(data^)
+    data^ = data^[4:]
+    u.h = read_f32(data^)
+    data^ = data^[4:]
+
+    u.r = read_f32(data^)
+    data^ = data^[4:]
+    u.g = read_f32(data^)
+    data^ = data^[4:]
+    u.b = read_f32(data^)
+    data^ = data^[4:]
+    u.a = read_f32(data^)
+    data^ = data^[4:]
 }
 
-write_i32 :: proc(buf: ^[dynamic]u8, v: i32) {
-    write_u32(buf, cast(u32)v)
+
+// u8 is a single byte — read/write is a direct index.
+// append_u8 follows the same ^[dynamic]byte pattern.
+
+read_u8 :: proc(b: []byte) -> u8 {
+    return b[0]
 }
-write_f32_le :: proc(buf: ^[dynamic]u8, v: f32) {
+
+write_u8 :: proc(b: []byte, v: u8) {
+    b[0] = v
+}
+
+append_u8 :: proc(buf: ^[dynamic]byte, v: u8) {
+    append(buf, v)
+}
+
+read_u8_at :: proc(b: []byte, off: int) -> (v: u8, next: int) {
+    return b[off], off + 1
+}
+
+// ---- i32 ----
+
+read_i32 :: proc(b: []byte) -> i32 {
+    return (i32)(b[0]) |
+           (i32)(b[1]) << 8  |
+           (i32)(b[2]) << 16 |
+           (i32)(b[3]) << 24
+}
+
+write_i32 :: proc(b: []byte, v: i32) {
+    b[0] = byte(v)
+    b[1] = byte(v >> 8)
+    b[2] = byte(v >> 16)
+    b[3] = byte(v >> 24)
+
+}
+
+
+// ---- f32 ----
+
+read_f32 :: proc(b: []byte) -> f32 {
+    bits := (u32)(b[0]) |
+            (u32)(b[1]) << 8  |
+            (u32)(b[2]) << 16 |
+            (u32)(b[3]) << 24
+
+    return transmute(f32)bits
+}
+
+write_f32 :: proc(b: []byte, v: f32) {
+    bits := transmute(u32) v
+    b[0] = byte(bits)
+    b[1] = byte(bits >> 8)
+
+    b[2] = byte(bits >> 16)
+    b[3] = byte(bits >> 24)
+}
+
+// ---- dynamic buffer appenders ----
+
+append_i32 :: proc(buf: ^[dynamic]byte, v: i32) {
+    append(buf,
+        byte(v),
+        byte(v >> 8),
+        byte(v >> 16),
+        byte(v >> 24),
+    )
+}
+
+
+append_f32 :: proc(buf: ^[dynamic]byte, v: f32) {
     bits := transmute(u32)v
+    append(buf,
+        byte(bits),
+        byte(bits >> 8),
 
-    append(buf, u8(bits))
-    append(buf, u8(bits >> 8))
-    append(buf, u8(bits >> 16))
-    append(buf, u8(bits >> 24))
+        byte(bits >> 16),
+
+        byte(bits >> 24),
+    )
+}
+
+// ---- offset variants (returns next cursor position) ----
+
+read_i32_at :: proc(b: []byte, off: int) -> (v: i32, next: int) {
+    return read_i32(b[off:]), off + 4
+}
+
+read_f32_at :: proc(b: []byte, off: int) -> (v: f32, next: int) {
+    return read_f32(b[off:]), off + 4
 }
 handle_server_msg_update_entity :: proc(e: ^Entity, msg: []byte) {
     fmt.printfln("msg of length %d.", len(msg));
@@ -119,14 +193,28 @@ nmain :: proc() -> int{
     // udp_send_sb(udp_sock, s);
     // use messages now
     data: [dynamic]byte;
-    write_u8(&data, MSG_CONNECT);
-    write_i32(&data, id);
+    append_u8(&data, MSG_CONNECT);
+    append_i32(&data, id);
     sent_count := udp_send_buf(udp_sock, data[:]);
     fmt.printfln("Sent %d bytes.", sent_count);
     r := udp_handle_recv(udp_sock);
     if r == "" {
         panic("Got nothing from server.");
     }
+
+    u := Entity{};
+    u.id = i32(id);
+
+    u.x = 120;
+    u.y = 121;
+    u.w = 100;
+    u.h = 101;
+    u.r = 122;
+    u.g = 123;
+    u.b = 124;
+    u.a = 255;
+    send_data :[dynamic]byte
+    dump_user(u, &send_data)
 
     for i in 0..<3 {
         s := strings.builder_make();
