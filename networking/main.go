@@ -1,12 +1,12 @@
 package main
 
 import (
+	"encoding/binary"
 	"log"
 	"math"
 	"net"
-)
-import (
-    "encoding/binary"
+	"sync"
+    "time"
 )
 
 type Server struct {
@@ -17,6 +17,7 @@ type User struct {
     // curent state
     x, y, w, h float32
     r, g, b, a float32 // color
+    addr net.UDPAddr
 }
 
 type server_error struct {
@@ -51,7 +52,7 @@ func (u *User)update(data []byte) error {
 }
 // x y w h r g b a
 func (u *User)dump(data *[]byte) {
-    delta := make([]byte, 0);
+    delta := make([]byte, 9*4);
     WriteI32(delta, u.id);
     WriteF32(delta, u.x);
     WriteF32(delta, u.y);
@@ -131,6 +132,7 @@ func WriteF32At(b []byte, off int, v float32) int {
 
     return off + 4
 }
+
 func main() {
     log.Println("Hello from Golang!");
     addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:3031");
@@ -143,7 +145,38 @@ func main() {
     }
     defer listener.Close();
 
+    user_mutex := sync.Mutex{}
     users := make(map[int]User);
+    // sender thread
+    go func(listener *net.UDPConn, m *sync.Mutex, users map[int]User) {
+        // every 50 milliseconds
+        ticker := time.NewTicker(1000 * time.Millisecond)
+        defer ticker.Stop()
+        for range ticker.C {
+            // array of array of bytes to send to uysers
+            packed := make([][]byte, 0);
+            for id, user := range users {
+                user.id = int32(id) //double check
+                data := make([]byte, 0);
+                user.dump(&data)
+                packed = append(packed, data)
+            }
+            i := 0
+            for _, user := range users {
+                for _, data := range packed {
+                    n, err := listener.WriteTo(data, &user.addr)
+                    if err != nil {
+                        log.Fatalf("Error in sending udp %s", err.Error())
+                    }
+                    if n == 0 {
+                        log.Fatalf("Sent 0 bytes.")
+                    }
+                }
+                log.Printf("%d Wrote data to user %d (%d packets)",i,  user.id, len(packed))
+                i += 1;
+            }
+        }
+    }(listener, &user_mutex, users)
 
     for {
         b   := make([]byte, 1024);
@@ -155,9 +188,15 @@ func main() {
         log.Printf("Read %d bytes into b, %d into oob\n", n, oobn)
         b = b[:n]
         msg_kind := ReadU8(b);
+        b = b[1:]
         if msg_kind == 1 { // connect request
             id := ReadI32(b);
-            users[int(id)] = User{};
+            log.Printf("Connect request from %d", id);
+            _, ok := users[int(id)];
+            if ok {
+                log.Fatalf("User %d already exists.", id);
+            }
+            users[int(id)] = User{id: id, addr: *sender};
             sent_count, _, err :=
                     listener.WriteMsgUDP([]byte("ok_connect"),
                                             nil, sender)
@@ -175,7 +214,24 @@ func main() {
             }
             log.Println("Wrote bytes", sent_count)
         } else if msg_kind == 3 { // update
-            
+            id := ReadI32(b)
+            b = b[4:]
+            if id < 0 {
+                log.Fatal("Id less than 0, likely malforemd data.");
+            }
+            user, ok := users[int(id)];
+            if !ok {
+                log.Fatalf("Id %d update but user doesn't exits.", id);
+            }
+            user.update(b)
+            users[int(id)] = user;
+            sent_count, _, err :=
+                    listener.WriteMsgUDP([]byte("ok_update"),
+                                            nil, sender)
+            if err != nil {
+                log.Fatal(err)
+            }
+            log.Println("Wrote bytes", sent_count)
         } else {
             log.Printf("Unhandled message kind %d\n", msg_kind)
         }

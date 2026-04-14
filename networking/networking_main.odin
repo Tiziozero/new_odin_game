@@ -7,6 +7,7 @@ import "core:net";
 MSG_INDICIES :: u8;
 MSG_CONNECT :: 1;
 MSG_DATA :: 2;
+MSG_UPDATE :: 3;
 Entity :: struct {
     id: i32,
     x, y, w, h,
@@ -185,6 +186,8 @@ udp_send_sb :: proc(socket: net.UDP_Socket, sb: strings.Builder) {
 }
 nmain :: proc() -> int{
     id := rand.int31();
+    id %= 1000
+    fmt.printfln("id %d", id)
     udp_sock, udp_sock_err := init_udp_sock();
     if udp_sock_err != net.Create_Socket_Error.None {
         panic("Failed to init udp socket.");
@@ -214,15 +217,17 @@ nmain :: proc() -> int{
     u.b = 124;
     u.a = 255;
     send_data :[dynamic]byte
+    append_u8(&send_data, MSG_UPDATE);
     dump_user(u, &send_data)
 
     for i in 0..<3 {
-        s := strings.builder_make();
+        /* s := strings.builder_make();
         strings.write_byte(&s, byte(MSG_DATA));
         // strings.builder_reset(&s);
         fmt.sbprintf(&s, " MSG arbitrary_message_%d.", i);
         udp_send_buf(udp_sock, s.buf[:]);
-        strings.builder_destroy(&s)
+        strings.builder_destroy(&s)*/
+        udp_send_buf(udp_sock, send_data[:]);
         udp_handle_recv(udp_sock);
     }
     return 1;
