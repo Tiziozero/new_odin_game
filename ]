@@ -14,7 +14,6 @@ MSG_UPDATE :: 3;
 State :: struct {
     udp_sock: net.UDP_Socket,
     running: i32, //atomically
-    entities: map[i32]Entity,
 }
 Entity :: struct {
     id: i32,
@@ -34,9 +33,7 @@ dump_user :: proc(u: Entity, data: ^[dynamic]byte) {
     append_f32(data, u.a);
 }
 load_user :: proc(u: ^Entity, data: ^[]byte) {
-    if len(data^) < 4*8 {
-        fmt.panicf("Length is less that 4 * 8: %d.", len(data^));
-    }
+    assert(len(data) > 4*8);
     u.x = read_f32(data^)
     data^ = data^[4:]
     u.y = read_f32(data^)
@@ -72,7 +69,7 @@ append_u8 :: proc(buf: ^[dynamic]byte, v: u8) {
     append(buf, v)
 }
 
-read_u8_at :: proc(b: []byte, off: i32) -> (v: u8, next: i32) {
+read_u8_at :: proc(b: []byte, off: int) -> (v: u8, next: int) {
     return b[off], off + 1
 }
 
@@ -140,15 +137,20 @@ append_f32 :: proc(buf: ^[dynamic]byte, v: f32) {
 
 // ---- offset variants (returns next cursor position) ----
 
-read_i32_at :: proc(b: []byte, off: i32) -> (v: i32, next: i32) {
+read_i32_at :: proc(b: []byte, off: int) -> (v: i32, next: int) {
     return read_i32(b[off:]), off + 4
 }
 
-read_f32_at :: proc(b: []byte, off: i32) -> (v: f32, next: i32) {
+read_f32_at :: proc(b: []byte, off: int) -> (v: f32, next: int) {
     return read_f32(b[off:]), off + 4
+}
+handle_server_msg_update_entity :: proc(e: ^Entity, msg: []byte) {
+    fmt.printfln("msg of length %d.", len(msg));
+    assert(len(msg) > 1);
 }
 
 init_udp_sock :: proc() -> (net.UDP_Socket, net.Network_Error) {
+
     sock_addr := net.parse_address("127.0.0.1", false);
     socket, err := net.make_bound_udp_socket(sock_addr, 0);
     if err != net.Create_Socket_Error.None {
@@ -159,21 +161,25 @@ init_udp_sock :: proc() -> (net.UDP_Socket, net.Network_Error) {
     return socket, net.Create_Socket_Error.None;
 }
 
-udp_send_buf :: proc(socket: net.UDP_Socket, buf: []byte) -> i32 {
+udp_send_buf :: proc(socket: net.UDP_Socket, buf: []byte) -> int {
     server_endpoint, _ := net.resolve_ip4("127.0.0.1:3031");
     n, e := net.send_udp(socket, buf, server_endpoint);
     if e != .None {
         panic("Faild to send from socker.");
     }
-    return i32(n)
+    return n
 }
-udp_handle_recv_buf :: proc(socket: net.UDP_Socket, buf: []byte) -> (i32, net.UDP_Recv_Error) {
+udp_handle_recv_buf :: proc(socket: net.UDP_Socket, buf: []byte) -> (n: int, errod: net.UDP_Recv_Error) {
     recv, endpoint, err := net.recv_udp(socket, buf);
     if err != .None {
         panic("recevied 0 bytes + error");
     }
-    // fmt.printfln("Received %d bytes.", recv);
-    return i32(recv), .None
+    if err != .None {
+        panic("recevied 0 bytes + error");
+    } else {
+        fmt.printfln("Received %d bytes.", n);
+        return recv, .None
+    }
 }
 udp_handle_recv :: proc(socket: net.UDP_Socket) -> (data: []byte, errod: net.UDP_Recv_Error) {
     buf := make([]byte, 1024);
@@ -187,19 +193,17 @@ udp_handle_recv :: proc(socket: net.UDP_Socket) -> (data: []byte, errod: net.UDP
         } else {
             delete(buf); // free ofc
             return nil, .None
+            // fmt.println("recevied 0 from", endpoint);
         }
     } else {
+        fmt.printfln("Received %d bytes.", n);
         return buf, .None
     }
 }
 udp_send_sb :: proc(socket: net.UDP_Socket, sb: strings.Builder) {
    udp_send_buf(socket, sb.buf[:]);
 }
-handle_unknown_user :: proc(state: ^State, id: i32) {
-    state.entities[id] = Entity{id=id};
-}
-
-nmain :: proc() -> i32{
+nmain :: proc() -> int{
     id := rand.int31();
     id %= 1000
     fmt.printfln("id %d", id)
@@ -214,12 +218,11 @@ nmain :: proc() -> i32{
     append_u8(&data, MSG_CONNECT);
     append_i32(&data, id);
     sent_count := udp_send_buf(udp_sock, data[:]);
-    fmt.printfln("Sent %d bytes (connection request).", sent_count);
+    fmt.printfln("Sent %d bytes.", sent_count);
     r, err := udp_handle_recv(udp_sock);
     if err != .None {
         panic("Got nothing from server.");
     }
-    // connection ok?
 
     u := Entity{};
     u.id = i32(id);
@@ -231,51 +234,33 @@ nmain :: proc() -> i32{
     u.g = 123;
     u.b = 124;
     u.a = 255;
-    entities := make(map[i32]Entity);
     user_mutex := sync.Mutex{}
-    state := State{udp_sock, 1, entities}
+    state := State{udp_sock, 1}
     receiver_thread := thread.create_and_start_with_poly_data2(
         &user_mutex, &state,
         proc(m: ^sync.Mutex, state: ^State) {
             buf: [1024]byte
-            for sync.atomic_load(&state.running) == 1 {
-                n, err := udp_handle_recv_buf(state.udp_sock, buf[:]);
+            for sync.atomic_load(&state.on) == 1 {
+                err := udp_handle_recv_buf(state.udp_sock, buf);
                 if err != .None {
                     fmt.eprintln("Err is not none in receiver thread", err);
                     return;
+
                 }
-                data := buf[:n]
-                fmt.printfln("Got %d bytes.", n);
-                msg_kind := read_u8(data);
-                data = data[1:]
-                switch msg_kind {
-                case MSG_UPDATE: {
-                    id := read_i32(data); // read id
-                    data = data[4:]
-                    user, ok := state.entities[i32(id)];
-                    if !ok {
-                        handle_unknown_user(state, id);
-                        // fmt.panicf("unknown user %d", id);
-                    }
-                    e := &state.entities[i32(id)];
-                    load_user(e, &data);
-                }
-                case: {
-                    fmt.panicf("unknown kind %d", msg_kind);
-                }
-                }
+                fmt.printfln("Got %d bytes.", len(data));
             }
         }
      );
+
+
     // loop
     send_data :[dynamic]byte
     append_u8(&send_data, MSG_UPDATE);
     dump_user(u, &send_data)
     for i in 0..<30000 {
         time.sleep(time.Millisecond*100);
-        fmt.println("loop:", state.entities[id]);
         udp_send_buf(udp_sock, send_data[:]);
+        thread.destroy(receiver_thread);
     }
-    thread.destroy(receiver_thread);
     return 1;
 }

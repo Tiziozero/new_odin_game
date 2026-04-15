@@ -2,11 +2,12 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"log"
 	"math"
 	"net"
 	"sync"
-    "time"
+	"time"
 )
 
 type Server struct {
@@ -53,15 +54,25 @@ func (u *User)update(data []byte) error {
 // x y w h r g b a
 func (u *User)dump(data *[]byte) {
     delta := make([]byte, 9*4);
-    WriteI32(delta, u.id);
-    WriteF32(delta, u.x);
-    WriteF32(delta, u.y);
-    WriteF32(delta, u.w);
-    WriteF32(delta, u.h);
-    WriteF32(delta, u.r);
-    WriteF32(delta, u.g);
-    WriteF32(delta, u.b);
-    WriteF32(delta, u.a);
+    wbuf := delta[:]
+    WriteI32(wbuf, u.id);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.x);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.y);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.w);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.h);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.r);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.g);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.b);
+    wbuf = wbuf[4:]
+    WriteF32(wbuf, u.a);
+    wbuf = wbuf[4:]
     *data = append(*data, delta...);
 }
 
@@ -158,10 +169,16 @@ func main() {
             for id, user := range users {
                 user.id = int32(id) //double check
                 data := make([]byte, 0);
+                data = append(data, 3); // append 3 - update
                 user.dump(&data)
+                for _, b := range data {
+                    fmt.Printf("%.2x ", b);
+                }
+                fmt.Println("");
                 packed = append(packed, data)
             }
             i := 0
+            // send
             for _, user := range users {
                 for _, data := range packed {
                     n, err := listener.WriteTo(data, &user.addr)
@@ -171,8 +188,10 @@ func main() {
                     if n == 0 {
                         log.Fatalf("Sent 0 bytes.")
                     }
+                    log.Printf("Wrote %d bytes.", n);
                 }
-                log.Printf("%d Wrote data to user %d (%d packets)",i,  user.id, len(packed))
+                log.Printf("%d Wrote data to user %d (%d packets)",
+                i, user.id, len(packed))
                 i += 1;
             }
         }
@@ -206,13 +225,6 @@ func main() {
             log.Println("Wrote bytes", sent_count)
         } else if msg_kind == 2 { // data
             log.Printf("got data \"%s\".\n", string(b[1:]))
-            sent_count, _, err :=
-                    listener.WriteMsgUDP([]byte("ok_msg"),
-                                            nil, sender)
-            if err != nil {
-                log.Fatal(err)
-            }
-            log.Println("Wrote bytes", sent_count)
         } else if msg_kind == 3 { // update
             id := ReadI32(b)
             b = b[4:]
@@ -225,13 +237,6 @@ func main() {
             }
             user.update(b)
             users[int(id)] = user;
-            sent_count, _, err :=
-                    listener.WriteMsgUDP([]byte("ok_update"),
-                                            nil, sender)
-            if err != nil {
-                log.Fatal(err)
-            }
-            log.Println("Wrote bytes", sent_count)
         } else {
             log.Printf("Unhandled message kind %d\n", msg_kind)
         }
