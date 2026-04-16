@@ -1,11 +1,11 @@
-package main
+package game
 import "core:math"
 
 AbilityCtx :: struct {
 };
 
 // just use owner in init
-AbilityHandler :: proc(game: ^game, self: ^Ability, owner: ^Entity);
+AbilityHandler :: proc(game: ^Game, self: ^Ability, owner: ^Entity);
 Ability :: struct {
     active, index, owner, level: int, // it's index in the enities ablity
     cooldown, cooldown_time, cost: f32,

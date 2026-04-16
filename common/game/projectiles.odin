@@ -1,4 +1,4 @@
-package main
+package game
 
 import "vendor:raylib"
 ProjectileData :: union {
@@ -7,9 +7,11 @@ ProjectileData :: union {
 ProjectileKind :: enum {
     PkBase,
 };
-ProjectileHandler :: proc(game: ^game, self: ^Projectile);
+ProjectileHandler :: proc(game: ^Game, self: ^Projectile);
+ProjectileDrawHandler :: proc(camera: rect, self: ^Projectile);
 Projectile :: struct { // effect and what not
-    update, draw: ProjectileHandler,
+    update: ProjectileHandler,
+    draw: ProjectileDrawHandler,
     kind: ProjectileKind,
     data: ProjectileData,
     index, active: int, // index in projectiles array, check if active

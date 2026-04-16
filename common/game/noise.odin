@@ -1,4 +1,4 @@
-package main
+package game
 import "core:math"
 noise_hash :: proc(x, y: int) -> f32 {
     n := x * 1619 + y * 31337
