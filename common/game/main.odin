@@ -9,7 +9,7 @@ import "core:mem"
 import "core:os"
 import "core:fmt"
 import "core:strings"
-import raylib "vendor:raylib" 
+import "vendor:raylib" 
 import "project:common/networking"
 
 vec2    :: raylib.Vector2;

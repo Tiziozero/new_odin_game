@@ -2,13 +2,12 @@
 package main
 
 import raylib "vendor:raylib"
-import "core:net";
 import "core:fmt";
 import "project:common/game"
 import "project:common/networking"
 
 State :: struct {
-    player_handle: player
+    player_handle: int,
     entities: map[int]game.Entity,
     projectiles: map[int]game.Entity,
 };
