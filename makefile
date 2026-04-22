@@ -1,5 +1,5 @@
-client:
-	odin build ./client -collection:project=.
+client: client/main.odin
+	./bclient.sh
 server:
 	odin build ./server -collection:project=.
 check_leaks:

@@ -73,11 +73,21 @@ rl_to_game :: proc(events: ^[dynamic]InputEvent) {
 SCREEN_SCALE :: 300;
 main :: proc() {
     fmt.printfln("Hellppe")
+    player := game.Entity{};
+    player.body.x = 100;
+    player.body.y = 100;
+    player.body.width = 100;
+    player.body.height = 100;
     raylib.InitWindow(4*SCREEN_SCALE, 3*SCREEN_SCALE, "Hellop!");
+    events: [dynamic]InputEvent;
     for !raylib.WindowShouldClose() {
+        rl_to_game(&events);
+        fmt.println(events);
         raylib.BeginDrawing();
         raylib.ClearBackground(raylib.PURPLE);
+        raylib.DrawRectangleRec(player.body, raylib.WHITE);
         raylib.EndDrawing();
+        clear(&events);
     }
     // init networking state
 }
