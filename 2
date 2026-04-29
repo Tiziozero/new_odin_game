@@ -93,9 +93,6 @@ handle_input :: proc(e: ^InputEvent, state: ^State) {
     }
     state.player_velocity += player_disp;
 }
-get_dt :: proc() -> f32 {
-    return raylib.GetFrameTime();
-}
 main :: proc() {
     fmt.printfln("Hellppe")
     player := game.Entity{};
@@ -106,29 +103,17 @@ main :: proc() {
     raylib.InitWindow(4*SCREEN_SCALE, 3*SCREEN_SCALE, "Hellop!");
     events: [dynamic]InputEvent;
     s := State{};
-    camera := raylib.Rectangle{
-        4*SCREEN_SCALE, 3*SCREEN_SCALE,
-        player.body.x, player.body.y};
-    // main loop
     for !raylib.WindowShouldClose() {
         rl_to_game(&events);
         for &k in events {
             handle_input(&k, &s);
         }
-        player.body.x += s.player_velocity.x * 100 * get_dt();
-        player.body.y += s.player_velocity.y * 100 * get_dt();
-
-        // update camera
-        camera.x = player.body.x - 4*SCREEN_SCALE/2 + player.body.width/2;
-        camera.y = player.body.y - 3*SCREEN_SCALE/2 + player.body.height/2;
-
+        // fmt.println(events);
         raylib.BeginDrawing();
         raylib.ClearBackground(raylib.PURPLE);
-        draw_entity(camera, &player);
-        // raylib.DrawRectangleRec(player.body, raylib.WHITE);
+        raylib.DrawRectangleRec(player.body, raylib.WHITE);
         raylib.EndDrawing();
         clear(&events);
-        s.player_velocity = raylib.Vector2{0,0};
     }
     // init networking state
 }

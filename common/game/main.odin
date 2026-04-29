@@ -1,6 +1,5 @@
 #+feature dynamic-literals
 package game
-
 CELLS := 80;
 
 import "core:time"
@@ -11,12 +10,39 @@ import "core:fmt"
 import "core:strings"
 import "vendor:raylib" 
 import "project:common/networking"
+import "project:common/buffer_io"
 
 vec2    :: raylib.Vector2;
 rect    :: raylib.Rectangle;
 t2d     :: raylib.Texture2D;
 color   :: raylib.Color;
 SCREEN_SIZE :: vec2{1200,900}
+
+EntityDelta :: struct {
+    body: raylib.Rectangle,
+    status: EntityStatus,
+}
+
+pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
+    buffer_io.buffer_write_u32(buf, transmute(u32)e.status);
+    buffer_io.buffer_write_f32(buf, e.body.x);
+    buffer_io.buffer_write_f32(buf, e.body.y);
+}
+unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
+    new_status, ok := buffer_io.buffer_read_u32(buf);
+    if !ok {
+        fmt.panicf("Failed to read u32\n");
+    }
+    e.status = transmute(EntityStatus)new_status;
+    e.body.x, ok = buffer_io.buffer_read_f32(buf);
+    if !ok {
+        fmt.panicf("Failed to read u32\n");
+    }
+    e.body.y, ok= buffer_io.buffer_read_f32(buf);
+    if !ok {
+        fmt.panicf("Failed to read u32\n");
+    }
+}
 
 rect_size :: proc(r: rect) -> vec2 {
     return vec2{r.width, r.height};
@@ -85,7 +111,7 @@ game_remove_projectile :: proc(game: ^Game, index: int) {
 
 EntityHandler :: proc(game: ^Game, handle: int);
 
-EntityStatus :: enum {
+EntityStatus :: enum u32 {
     ESDEAD = 0,
     ESALIVE,
     ESDYING,
@@ -98,7 +124,6 @@ Entity :: struct {
     body: rect,
     direction: vec2,
     atk, def, health, max_health, speed: f32,
-    payload: rawptr,
     update, draw: EntityHandler,
     abilities: [5]Ability // for entities and what not?
 }
