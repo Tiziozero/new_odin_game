@@ -3,6 +3,8 @@ package main
 
 import raylib "vendor:raylib"
 import "core:fmt";
+import "core:strings";
+import "core:mem";
 import "project:common/game"
 import "project:common/networking"
 
@@ -11,6 +13,10 @@ State :: struct {
     entities: map[int]game.Entity,
     projectiles: map[int]game.Entity,
     player_velocity: raylib.Vector2,
+
+
+    frame_arena: mem.Dynamic_Arena,
+    logs: [dynamic]string,
 };
 InputHandler :: struct {
     action: proc(game: ^State),
@@ -96,6 +102,10 @@ handle_input :: proc(e: ^InputEvent, state: ^State) {
 get_dt :: proc() -> f32 {
     return raylib.GetFrameTime();
 }
+state_loop :: proc(s: ^State) {
+    mem.dynamic_arena_reset(&s.frame_arena);
+    clear(&s.logs);
+}
 main :: proc() {
     fmt.printfln("Hellppe")
     player := game.Entity{};
@@ -106,12 +116,15 @@ main :: proc() {
     raylib.InitWindow(4*SCREEN_SCALE, 3*SCREEN_SCALE, "Hellop!");
     events: [dynamic]InputEvent;
     s := State{};
+    mem.dynamic_arena_init(&s.frame_arena);
     camera := raylib.Rectangle{
         4*SCREEN_SCALE, 3*SCREEN_SCALE,
         player.body.x, player.body.y};
     // main loop
     for !raylib.WindowShouldClose() {
+        append(&s.logs, "Hello, World!!")
         rl_to_game(&events);
+        append(&s.logs, "events!");
         for &k in events {
             handle_input(&k, &s);
         }
@@ -126,6 +139,13 @@ main :: proc() {
         raylib.ClearBackground(raylib.PURPLE);
         draw_entity(camera, &player);
         // raylib.DrawRectangleRec(player.body, raylib.WHITE);
+        i : i32= 0;
+        for l in s.logs {
+            cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator);
+            raylib.DrawText(cstr, 10, 10 + 24*i, 24, raylib.WHITE);
+            i += 1;
+        }
+        state_loop(&s);
         raylib.EndDrawing();
         clear(&events);
         s.player_velocity = raylib.Vector2{0,0};
