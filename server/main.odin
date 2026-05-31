@@ -4,6 +4,7 @@ import "core:math/rand"
 import "core:sync"
 import "core:math"
 import "core:strings"
+import "vendor:raylib"
 import "core:net"
 import "core:fmt"
 import "project:common/game"
@@ -57,8 +58,11 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         sync.mutex_lock(&g.entities_lock);
         c := Client{}
         c.endpoint = endpoint;
+        t := u32(rand.int31()%i32(len(g.assets.assets)));
+        fmt.println(t, len(g.assets.assets));
         c.entity = game.Entity{
-            texture=u32(rand.int31()%i32(len(g.assets.assets))),
+            texture=t,
+            body= raylib.Rectangle{0,0,100,100}
         };
         c.last_ping = time.now();
         g.entities[game.EntityHandle(id)] = c;
@@ -136,6 +140,7 @@ game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer) -> int {
         delta := game.EntityDelta{};
         delta.body = e.entity.body;
         delta.status = e.entity.status;
+        delta.texture = e.entity.texture;
         buffer_io.buffer_write_u32(buf, u32(k));
         game.pack_entity(buf, &delta);
     }
@@ -161,7 +166,7 @@ pack_game_loop_data :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     for k, e in g.entities {
         buffer_io.buffer_write_u32(buf, u32(k));
-        delta := game.EntityDelta{status=e.entity.status, body=e.entity.body};
+        delta := game.EntityDelta{status=e.entity.status, body=e.entity.body,texture=e.entity.texture};
         game.pack_entity(buf, &delta);
     }
 }

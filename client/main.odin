@@ -103,7 +103,11 @@ rl_to_game :: proc(events: ^[dynamic]InputEvent) {
 SCREEN_SCALE :: 300;
 draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     p := apply_camera(camera, game.rect_pos(e.body));
-    raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.BLUE);
+    if e.body.width == 0 || e.body.height == 0 {
+        fmt.println(e);
+        panic("body is fucked");
+    }
+    raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.RED);
     raylib.DrawTexturePro(s.assets.assets[e.texture].texture,
         raylib.Rectangle{
             x=0,y=0,
@@ -217,7 +221,6 @@ init_game_con :: proc(s: ^State) -> i32 {
             e.texture = delta.texture;
             s.state_entities[id] = e;
             e.id = id;
-            fmt.println("\t", id, delta);
         }
         buffer_io.buffer_destroy(&recv_buf_b)
     }
@@ -307,11 +310,11 @@ main :: proc() {
 
 
 
-    player := game.Entity{};
-    player.body.x = 100;
-    player.body.y = 100;
-    player.body.width = 100;
-    player.body.height = 100;
+    player, pok := s.state_entities[ID];
+    if !pok {
+        panic("no player in entities");
+    }
+
     events: [dynamic]InputEvent;
     mem.dynamic_arena_init(&s.frame_arena);
     f := raylib.LoadFont("font.ttf");
@@ -320,14 +323,28 @@ main :: proc() {
         player.body.x, player.body.y};
     i := 0;
     ping_id :u8= 0;
+    pref : game.Entity
     // main loop
     for !raylib.WindowShouldClose() && s.connected {
+        // copy entities
+        clear_map(&s.current_entities)
+        sync.lock(&s.entities_lock);
+        for k, e in s.state_entities {
+            s.current_entities[k] = e
+        }
+        sync.unlock(&s.entities_lock);
+        // get player info
+        pok: bool
+        pref, pok = s.current_entities[ID];
+        assert(pok);
         append(&s.logs, "Hello, World!!")
         rl_to_game(&events);
         append(&s.logs, "events!");
         append(&s.logs, fmt.aprintf("ID: %d", ID));
-        append(&s.logs, fmt.aprintf("pos :%.0f %.0f",
+        append(&s.logs, fmt.aprintf("pos  :%.0f %.0f",
                 player.body.x, player.body.y, allocator = s.frame_arena.block_allocator));
+        append(&s.logs, fmt.aprintf("spos :%.0f %.0f",
+                pref.body.x, pref.body.y, allocator = s.frame_arena.block_allocator));
         append(&s.logs, fmt.aprintf("ping? :%.5f", s.ping, allocator = s.frame_arena.block_allocator))
         for &k in events {
             handle_input(&k, &s);
@@ -336,21 +353,14 @@ main :: proc() {
         player.body.y += s.player_velocity.y * 100 * get_dt();
 
         // update camera
-        s.camera.x = player.body.x - 4*SCREEN_SCALE/2 + player.body.width/2;
-        s.camera.y = player.body.y - 3*SCREEN_SCALE/2 + player.body.height/2;
+        s.camera.x = pref.body.x - 4*SCREEN_SCALE/2 + pref.body.width/2;
+        s.camera.y = pref.body.y - 3*SCREEN_SCALE/2 + pref.body.height/2;
 
         raylib.BeginDrawing();
         raylib.ClearBackground(raylib.PURPLE);
-        // copy entities
-        clear_map(&s.current_entities)
-        sync.lock(&s.entities_lock);
-        for k, e in s.state_entities {
-            s.current_entities[k] = e
-        }
-        sync.unlock(&s.entities_lock);
         for k, e in s.current_entities {
             c := e;
-               draw_entity(&s, s.camera, &c);
+           draw_entity(&s, s.camera, &c);
         }
         { // i here conflicts with ping i
             i : i32= 0;
@@ -369,7 +379,11 @@ main :: proc() {
             b := buffer_io.buffer_make(128);
             buffer_io.buffer_write_u8(&b,networking.MSG_USER_DATA);
             buffer_io.buffer_write_u32(&b,ID);
-            delta := game.EntityDelta{body=player.body};
+            delta := game.EntityDelta{
+                texture=player.texture,
+                body=player.body,
+                status=player.status,
+            };
             game.pack_entity(&b, &delta);
             _, ok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint);
             assert(ok == .None);
