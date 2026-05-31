@@ -8,7 +8,10 @@ MSG_INDICIES :: u8;
 MSG_CONNECT :: 1;
 MSG_DATA :: 2;
 MSG_UPDATE :: 3;
-
+MSG_GET_STATE :: 4;
+MSG_PING :: 5;
+MSG_GAME_DATA :: 6;
+MSG_USER_DATA :: 7;
 init_udp_socket :: proc(port := 0) -> (net.UDP_Socket, net.Network_Error) {
     sock_addr := net.parse_address("127.0.0.1", false);
     socket, err := net.make_bound_udp_socket(sock_addr, port);
@@ -19,9 +22,8 @@ init_udp_socket :: proc(port := 0) -> (net.UDP_Socket, net.Network_Error) {
     return socket, net.Create_Socket_Error.None;
 }
 
-udp_send_buf :: proc(socket: net.UDP_Socket, buf: []byte) -> i32 {
-    server_endpoint, _ := net.resolve_ip4("127.0.0.1:3031");
-    n, e := net.send_udp(socket, buf, server_endpoint);
+udp_send_buf :: proc(socket: net.UDP_Socket, buf: []byte, endpoint: net.Endpoint) -> i32 {
+    n, e := net.send_udp(socket, buf, endpoint);
     if e != .None {
         panic("Faild to send from socker.");
     }

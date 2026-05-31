@@ -1,15 +1,9 @@
-#+feature dynamic-literals
 package game
 CELLS := 80;
 
-import "core:time"
-import "core:net"
-import "core:mem"
 import "core:os"
 import "core:fmt"
-import "core:strings"
 import "vendor:raylib" 
-import "project:common/networking"
 import "project:common/buffer_io"
 
 SCREEN_SIZE :: raylib.Vector2{1200,900}
@@ -23,6 +17,8 @@ pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     buffer_io.buffer_write_u32(buf, transmute(u32)e.status);
     buffer_io.buffer_write_f32(buf, e.body.x);
     buffer_io.buffer_write_f32(buf, e.body.y);
+    buffer_io.buffer_write_f32(buf, e.body.width);
+    buffer_io.buffer_write_f32(buf, e.body.height);
 }
 unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     new_status, ok := buffer_io.buffer_read_u32(buf);
@@ -35,6 +31,14 @@ unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
         fmt.panicf("Failed to read u32\n");
     }
     e.body.y, ok= buffer_io.buffer_read_f32(buf);
+    if !ok {
+        fmt.panicf("Failed to read u32\n");
+    }
+    e.body.width, ok = buffer_io.buffer_read_f32(buf);
+    if !ok {
+        fmt.panicf("Failed to read u32\n");
+    }
+    e.body.height, ok= buffer_io.buffer_read_f32(buf);
     if !ok {
         fmt.panicf("Failed to read u32\n");
     }
@@ -53,7 +57,7 @@ EntityStatus :: enum u32 {
     ESDYING,
     ESON=ESALIVE,
 };
-EntityHandle :: int;
+EntityHandle :: u32;
 Entity :: struct {
     status: EntityStatus,
     handle: EntityHandle,

@@ -1,12 +1,18 @@
-#+feature dynamic-literals
 package main
 
+import "core:c"
+import "core:time"
+import "core:net"
+import "core:sync"
+import "core:thread"
 import raylib "vendor:raylib"
 import "core:fmt";
 import "core:strings";
 import "core:mem";
 import "project:common/game"
 import "project:common/networking"
+import "project:common/buffer_io"
+ID :: 5
 apply_camera :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Vector2 {
     return v - game.rect_pos(camera);
 };
@@ -16,12 +22,16 @@ unapply_camera :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Ve
 
 State :: struct {
     player_handle: int,
-    entities: map[int]game.Entity,
+    entities_lock: sync.Mutex,
+    entities: map[game.EntityHandle]game.Entity,
     player_velocity: raylib.Vector2,
     camera: raylib.Rectangle,
 
     frame_arena: mem.Dynamic_Arena,
     logs: [dynamic]string,
+    socket: net.UDP_Socket,
+    connected: bool,
+    server_endpoint: net.Endpoint,
 };
 InputHandler :: struct {
     action: proc(game: ^State),
@@ -85,6 +95,7 @@ rl_to_game :: proc(events: ^[dynamic]InputEvent) {
 SCREEN_SCALE :: 300;
 draw_entity :: proc(camera: raylib.Rectangle, e: ^game.Entity) {
     p := apply_camera(camera, game.rect_pos(e.body));
+       fmt.println(e.body)
     raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.BLUE);
 }
 handle_input :: proc(e: ^InputEvent, state: ^State) {
@@ -111,29 +122,153 @@ state_loop :: proc(s: ^State) {
     mem.dynamic_arena_reset(&s.frame_arena);
     clear(&s.logs);
 }
-init_game_con :: proc() {
+init_game_con :: proc(s: ^State) -> i32 {
+    socket, err := net.make_unbound_udp_socket(.IP4);
+    if err != .None {
+        panic("Err is not none in creating socket");
+    }
+    request_buf : [dynamic]byte;
+    append(&request_buf, networking.MSG_CONNECT);
+    append(&request_buf, ID);
+    append(&request_buf, 0);
+    append(&request_buf, 0);
+    append(&request_buf, 0);
+    // resolve server endpoint
+    server_endpoint, _ := net.resolve_ip4("127.0.0.1:8081");
+    n, serr := net.send_udp(socket, request_buf[:], server_endpoint);
+    if serr != .None {
+        panic("err in sending connection request");
+    }
+    fmt.printfln("Wrote %d bytes", n);
+    // set endpoint
+    s.socket = socket;
+    s.server_endpoint = server_endpoint;
+
+    // set timeout for receive
+    net.set_option(socket, .Receive_Timeout, 3*time.Second);
+    recv_buf : [1024]byte;
+    rn, endp, rerr := net.recv_udp(socket, recv_buf[:]);
+    if rerr != .None {
+        panic("Err in receiving from server");
+    }
+    if endp != server_endpoint {
+        panic("Received packet from someone not server");
+    }
+
+    if string(recv_buf[:rn]) != "ack" {
+        panic("not ack");
+    }
+    clear(&request_buf)
+    append(&request_buf, networking.MSG_GET_STATE)
+    n, serr = net.send_udp(socket, request_buf[:], server_endpoint);
+    if serr != .None {
+        panic("err in sending connection request");
+    }
+    fmt.printfln("Wrote %d bytes for request state", n);
+    {
+        recv_buf_b := buffer_io.buffer_make(1024);
+        rn, endp, rerr := net.recv_udp(socket, recv_buf_b.data[:]);
+        if rerr != .None {
+            panic("Err in receiving from server");
+        }
+        if endp != server_endpoint {
+            panic("Received packet from someone not server");
+        }
+        recv_buf_b.len = rn;
+        count, ok := buffer_io.buffer_read_u32(&recv_buf_b);
+        fmt.printfln("got %d count", count);
+        for k in 0..<count {
+            id, ok := buffer_io.buffer_read_u32(&recv_buf_b);
+            if !ok {
+                panic("Failed to read id");
+            }
+            delta := game.EntityDelta{};
+            game.unpack_entity(&recv_buf_b, &delta);
+            fmt.println(id, delta);
+        }
+    }
+
+    return 0;
 }
+receiver_thread :: proc(s: ^State) {
+    buf := buffer_io.buffer_make(1024);
+    for {
+        n, endpoint, err := net.recv_udp(s.socket, buf.data[:]);
+        if err != .None {
+            fmt.println(err, s.socket);
+            panic("recevied error in loop");
+        }
+        if endpoint != s.server_endpoint {
+            fmt.println(endpoint);
+            panic("received msg from not server");
+        }
+        buf.len = n;
+        msg, ok := buffer_io.buffer_read_u8(&buf);
+        if !ok {
+            panic("Failed to read message kind");
+        }
+        // fmt.printfln("got %d bytes (msg %d).", n, msg);
+        if msg == networking.MSG_GAME_DATA {
+            sync.mutex_lock(&s.entities_lock);
+            count, ok := buffer_io.buffer_read_u32(&buf);
+            assert(ok);
+            fmt.printfln("Got %d entities.", count);
+            for i in 0..<count {
+                id, ok := buffer_io.buffer_read_u32(&buf);
+                delta := game.EntityDelta{};
+                game.unpack_entity(&buf, &delta);
+                last, last_ok := s.entities[id];
+                if !last_ok {
+                    last = game.Entity{};
+                }
+                last.body = delta.body
+                last.status = delta.status
+                s.entities[id] = last;
+            }
+            sync.mutex_unlock(&s.entities_lock);
+        }
+
+        buffer_io.buffer_reset(&buf)
+    }
+}
+thread_receiver_fn :: proc(data: rawptr) {
+    receiver_thread(transmute(^State)data);
+}
+thread_sender_fn :: proc(data: rawptr) {
+    // handle_sender_loop(transmute(^Game)data, 100);
+}
+
 main :: proc() {
-    fmt.printfln("Hellppe")
+    s := State{};
+    if init_game_con(&s) != 0 {
+        return;
+    }
+
+    t_receiver := thread.create_and_start_with_data(data=&s, fn=thread_receiver_fn);
+
+
+
     player := game.Entity{};
     player.body.x = 100;
     player.body.y = 100;
     player.body.width = 100;
     player.body.height = 100;
     raylib.InitWindow(4*SCREEN_SCALE, 3*SCREEN_SCALE, "Hellope!");
+    raylib.SetTargetFPS(60);
     events: [dynamic]InputEvent;
-    s := State{};
     mem.dynamic_arena_init(&s.frame_arena);
     f := raylib.LoadFont("font.ttf");
     s.camera = raylib.Rectangle{
         4*SCREEN_SCALE, 3*SCREEN_SCALE,
         player.body.x, player.body.y};
+    i := 0;
     // main loop
     for !raylib.WindowShouldClose() {
         append(&s.logs, "Hello, World!!")
         rl_to_game(&events);
         append(&s.logs, "events!");
-        append(&s.logs, fmt.aprintf("pos :%.0f %.0f", player.body.x, player.body.y, allocator = s.frame_arena.block_allocator));
+        append(&s.logs, fmt.aprintf("pos :%.0f %.0f",
+                player.body.x, player.body.y, allocator = s.frame_arena.block_allocator));
         for &k in events {
             handle_input(&k, &s);
         }
@@ -146,19 +281,55 @@ main :: proc() {
 
         raylib.BeginDrawing();
         raylib.ClearBackground(raylib.PURPLE);
-        draw_entity(s.camera, &player);
-        // raylib.DrawRectangleRec(player.body, raylib.WHITE);
-        i : i32= 0;
-        for l in s.logs {
-            cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator);
-            raylib.DrawTextEx(f, cstr, raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);
-            i += 1;
+        sync.lock(&s.entities_lock);
+        fmt.printfln("%d entities to draw", len(s.entities));
+        for k, e in s.entities {
+            c := e;
+            draw_entity(s.camera, &c);
+        }
+        sync.unlock(&s.entities_lock);
+        { // i here conflicts with ping i
+            i : i32= 0;
+            for l in s.logs {
+                cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator);
+                raylib.DrawTextEx(f, cstr, raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);
+                i += 1;
+            }
         }
         state_loop(&s);
         raylib.EndDrawing();
         clear(&events);
         s.player_velocity = raylib.Vector2{0,0};
+        {
+            // send player to server
+            b := buffer_io.buffer_make(128);
+            buffer_io.buffer_write_u8(&b,networking.MSG_USER_DATA);
+            buffer_io.buffer_write_u32(&b,ID);
+            delta := game.EntityDelta{body=player.body};
+            game.pack_entity(&b, &delta);
+            _, ok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint);
+            assert(ok == .None);
+        }
+
+        i += 1;
+        if i%30 == 0 {
+            i = 0;
+            b := make([dynamic]byte);
+           append(&b, networking.MSG_PING);
+           append(&b, ID);
+           append(&b, 0);
+           append(&b, 0);
+           append(&b, 0);
+           n, err :=net.send_udp(s.socket, b[:], s.server_endpoint);
+           if err !=.None {
+               fmt.println(err);
+               panic("Err in ping");
+           }
+           fmt.println("sent ping bytes", n);
+           delete(b)
+        }
     }
     raylib.UnloadFont(f);
+    thread.join(t_receiver)
     // init networking state
 }
