@@ -1,5 +1,6 @@
 package game
 CELLS := 80;
+import "core:strings"
 
 import "core:os"
 import "core:fmt"
@@ -11,6 +12,7 @@ SCREEN_SIZE :: raylib.Vector2{1200,900}
 EntityDelta :: struct {
     body: raylib.Rectangle,
     status: EntityStatus,
+    texture: u32,
 }
 
 pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
@@ -19,6 +21,7 @@ pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     buffer_io.buffer_write_f32(buf, e.body.y);
     buffer_io.buffer_write_f32(buf, e.body.width);
     buffer_io.buffer_write_f32(buf, e.body.height);
+    buffer_io.buffer_write_u32(buf, transmute(u32)e.texture);
 }
 unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     new_status, ok := buffer_io.buffer_read_u32(buf);
@@ -42,6 +45,10 @@ unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     if !ok {
         fmt.panicf("Failed to read u32\n");
     }
+    e.texture, ok = buffer_io.buffer_read_u32(buf);
+    if !ok {
+        fmt.panicf("Failed to read u32\n");
+    }
 }
 
 rect_size :: proc(r: raylib.Rectangle) -> raylib.Vector2 {
@@ -61,8 +68,9 @@ EntityHandle :: u32;
 Entity :: struct {
     status: EntityStatus,
     handle: EntityHandle,
-    texture: int, // texture key for game.textures
+    texture: u32, // texture key for game.textures
     body: raylib.Rectangle,
+    id: EntityHandle,
 }
 get_env :: proc(s: string) -> string {
     ret := os.get_env(s, context.allocator);
@@ -70,7 +78,63 @@ get_env :: proc(s: string) -> string {
     return ret;
 }
 
-entity_new :: proc(txt_handle: int, x, y, w, h: f32) -> Entity {
+import "core:io";
+import "core:encoding/json"
+AssetsConfig :: struct {
+    img, name: string,
+    width, height: int
+}
+
+
+
+Asset :: struct {
+    texture: raylib.Texture2D,
+    img, name: string,
+    width, height: int
+}
+AssetManger :: struct {
+    assets: []Asset,
+}
+load_assets :: proc(config_path: string, load:=false, allocator:=context.allocator) -> AssetManger {
+    data, err := os.read_entire_file_from_path(config_path, context.allocator);
+    if err != io.Error.None {
+        panic("Failed to read file")
+    }
+    defer delete(data)
+
+    config: []AssetsConfig
+
+    merr := json.unmarshal(data, &config)
+    if merr != nil {
+        fmt.println(merr)
+        panic("JSON error")
+    }
+
+    fmt.println(config)
+    am := AssetManger{}
+    fmt.println("Len assets config:", len(config))
+    am.assets = make([]Asset, len(config));
+    for k, i in config {
+        fmt.println(i, "loading", k.img);
+        cstr := strings.clone_to_cstring(k.img, allocator=allocator)
+        t : raylib.Texture2D
+        if load {
+            t = raylib.LoadTexture(cstr);
+        } 
+        am.assets[i] = Asset {
+            img = k.img,
+            name = k.name,
+            height = k.height,
+            width = k.width,
+            texture = t,
+        }
+        fmt.println("freeing", k.img);
+        // delete(cstr)
+        fmt.println("freed", k.img);
+    }
+    return am
+}
+entity_new :: proc(txt_handle: u32, x, y, w, h: f32) -> Entity {
     e : Entity;
     e.texture = txt_handle;
     e.body.x = x;

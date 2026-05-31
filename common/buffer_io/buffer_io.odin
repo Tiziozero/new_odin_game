@@ -1,5 +1,6 @@
 package buffer_io
 
+import "core:strings"
 import "core:mem"
 
 Buffer :: struct {
@@ -49,6 +50,16 @@ buffer_write :: proc(buf: ^Buffer, v: $T) -> bool {
     return true
 }
 
+buffer_write_string :: proc(buf: ^Buffer, s: string) -> bool {
+    l := len(s)
+    assert(l > 0)
+    if buf.len + size_of(u32) + l > buf.cap do return false
+    buffer_write_u32(buf, u32(l))
+    copy(buf.data[buf.len:], s)
+    buf.len += l
+    return true
+}
+
 // ── Read ─────────────────────────────────────────────────────────────────────
 
 buffer_read_bytes :: proc(buf: ^Buffer, n: int) -> (data: []byte, ok: bool) {
@@ -56,6 +67,15 @@ buffer_read_bytes :: proc(buf: ^Buffer, n: int) -> (data: []byte, ok: bool) {
     data = buf.data[buf.pos : buf.pos + n]
     buf.pos += n
     return data, true
+}
+buffer_read_string :: proc(buf: ^Buffer, allocator := context.allocator) -> (string, bool) {
+    l, ok := buffer_read_u32(buf)
+    assert(ok)
+    if buf.pos + int(l) > buf.len do return "", false
+    s, sok := strings.clone_from_bytes(buf.data[buf.pos : buf.pos + int(l)], allocator = allocator)
+    assert(sok == .None)
+    buf.pos += int(l)  // missing
+    return s, true
 }
 
 buffer_read :: proc(buf: ^Buffer, $T: typeid) -> (v: T, ok: bool) {
