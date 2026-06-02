@@ -13,6 +13,7 @@ MSG_PING :: 5;
 MSG_PING_RESPOND :: 6;
 MSG_GAME_DATA :: 7;
 MSG_USER_DATA :: 8;
+MSG_USER_MSG :: 9;
 init_udp_socket :: proc(port := 0) -> (net.UDP_Socket, net.Network_Error) {
     sock_addr := net.parse_address("127.0.0.1", false);
     socket, err := net.make_bound_udp_socket(sock_addr, port);

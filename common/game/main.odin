@@ -7,6 +7,9 @@ import "core:fmt"
 import "vendor:raylib" 
 import "project:common/buffer_io"
 
+
+USR_MSG_MOVE:: 1;
+
 SCREEN_SIZE :: raylib.Vector2{1200,900}
 
 EntityDelta :: struct {
@@ -134,15 +137,6 @@ load_assets :: proc(config_path: string, load:=false, allocator:=context.allocat
     }
     return am
 }
-entity_new :: proc(txt_handle: u32, x, y, w, h: f32) -> Entity {
-    e : Entity;
-    e.texture = txt_handle;
-    e.body.x = x;
-    e.body.y = y;
-    e.body.width = w;
-    e.body.height = h;
-    return e;
-};
 /*
 The key insight is push out on the shallowest overlap axis — if you're barely clipping a wall on the left but deeply overlapping on the top, you're hitting the side, not the top. Resolving the smaller overlap is almost always correct.
    */

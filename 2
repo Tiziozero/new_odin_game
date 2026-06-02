@@ -33,12 +33,7 @@ Game :: struct {
 game_init :: proc() -> Game {
     g := Game{}
     g.assets = game.load_assets("imgs.json");
-    m := game.Map{};
-    m.chunks = make(map[game.v2i]game.Chunk);
-    m.seed = 420
-    m.octaves = 16
-    g.gmap = m;
-    game.generate_chunck(&g.gmap, 0,0);
+    g.gmap = game.generate_chunck(g.gmap, 0,0);
     g.entities = make(map[game.EntityHandle]Client);
     return g;
 }
@@ -210,28 +205,8 @@ check_client_map_collisions :: proc (g: ^Game, c: ^Client) {
     // get entities map
     chunck_i_x := int(c.entity.body.x / game.CHUNK_SIDE_SIZE);
     chunck_i_y := int(c.entity.body.y / game.CHUNK_SIDE_SIZE);
-    for x in -1..=1 {
-        for y in -1..=1 {
-            chunk_i := game.v2i{x=chunck_i_x+x, y=chunck_i_y+y};
+    chunk_i := game.v2i{x=chunck_i_x, y=chunck_i_y};
              chunk := game.map_get_chunk(&g.gmap, chunk_i)
-             for r, rk in chunk.tiles {
-                 for t, rt in r {
-                     if t.collidable {
-                         if game.entity_wall_collision(&c.entity.body,
-                             & raylib.Rectangle{
-                                 f32(((chunck_i_x+x)*game.CHUNK_SIZE + rt)*game.TILES_SIZE),
-                                 f32(((chunck_i_y+y)*game.CHUNK_SIZE + rk)*game.TILES_SIZE),
-                                 game.TILES_SIZE,
-                                 game.TILES_SIZE}
-) {
-                             // make it so that it stops moving at collision with wall.
-                             c.move_to = game.rect_pos(c.entity.body);
-                         }
-                     }
-                 }
-             }
-        }
-    }
 
 }
 ENTITY_SPEED :: 80
@@ -244,10 +219,8 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
                raylib.Vector2Distance(current_pos, next_pos)
 
     target := c.move_to if reached else next_pos
-
     c.entity.body.x = target.x
     c.entity.body.y = target.y
-    check_client_map_collisions(g, c);
 }
 MAX_TIMEOUT :: 10
 handle_sender_loop :: proc(g: ^Game, n: int) {

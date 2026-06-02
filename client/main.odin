@@ -1,6 +1,7 @@
 package main
 
-import "vendor:raylib/rlgl"
+SCREEN_FACTOR :: f32(1.0/2.0)
+
 import "core:math/rand"
 import "core:time"
 import "core:net"
@@ -29,7 +30,6 @@ State :: struct {
     state_entities: map[game.EntityHandle]game.Entity,
     // interpolates from server entities
     current_entities: map[game.EntityHandle]game.Entity,
-    player_velocity: raylib.Vector2,
     camera: raylib.Rectangle,
     assets: game.AssetManger,
 
@@ -87,7 +87,8 @@ rl_to_game :: proc(events: ^[dynamic]InputEvent) {
             append(events, InputEvent{
                 kind  = .IE_MB_PRESSED,
                 mb    = mb,
-                click = raylib.GetMousePosition(),
+                click = raylib.GetMousePosition()/raylib.Vector2{
+                    SCREEN_WIDTH,SCREEN_HEIGHT}, // 0 to 1
             });
         }
 
@@ -101,6 +102,10 @@ rl_to_game :: proc(events: ^[dynamic]InputEvent) {
     }
 }
 SCREEN_SCALE :: 300;
+SCREEN_WIDTH :: 4*SCREEN_SCALE
+SCREEN_HEIGHT :: 3*SCREEN_SCALE
+SCALED_SCREEN_WIDTH :: f32(SCREEN_WIDTH*SCREEN_FACTOR)
+SCALED_SCREEN_HEIGHT :: f32(SCREEN_HEIGHT*SCREEN_FACTOR)
 draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     p := apply_camera(camera, game.rect_pos(e.body));
     if e.body.width == 0 || e.body.height == 0 {
@@ -108,14 +113,7 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
         panic("body is fucked");
     }
     raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.RED);
-    raylib.DrawTexturePro(s.assets.assets[e.texture].texture,
-        raylib.Rectangle{
-            x=0,y=0,
-            width=f32(s.assets.assets[e.texture].texture.width),
-            height=f32(s.assets.assets[e.texture].texture.height)
-        },
-        raylib.Rectangle{p.x,p.y, e.body.width, e.body.height},
-        raylib.Vector2{0,0}, 0, raylib.WHITE);
+    // raylib.DrawTexturePro(s.assets.assets[e.texture].texture, raylib.Rectangle{ x=0,y=0, width=f32(s.assets.assets[e.texture].texture.width), height=f32(s.assets.assets[e.texture].texture.height) }, raylib.Rectangle{p.x,p.y, e.body.width, e.body.height}, raylib.Vector2{0,0}, 0, raylib.WHITE);
     // draw id
     str := fmt.aprintf("%d", e.id, allocator=s.frame_arena.block_allocator);
     cstr := strings.clone_to_cstring(str, allocator=s.frame_arena.block_allocator)
@@ -126,25 +124,44 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
                (e.body.height/2+20)*raylib.Vector2{0,1} -
                raylib.Vector2{f32(w)/2, 0});
 
+    raylib.DrawRectangle(i32(tpos.x)-2, i32(tpos.y), w + 4, 20, raylib.BLACK);
     raylib.DrawText(cstr, i32(tpos.x), i32(tpos.y), 20, raylib.WHITE);
     delete(cstr);
 }
-handle_input :: proc(e: ^InputEvent, state: ^State) {
-    player_disp := raylib.Vector2{0,0};
+handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
     case .IE_KEY_DOWN:
-    {
-        #partial switch e.k {
-        case .A: player_disp.x -= 1;
-        case .D: player_disp.x += 1;
-        case .W: player_disp.y -= 1;
-        case .S: player_disp.y += 1;
-        case:
+        {
+            #partial switch e.k {
+            case .A: fmt.println("a");
+            case .D: fmt.println("d");
+            case .W: fmt.println("w");
+            case .S: fmt.println("s");
+            case:
+            }
+        }
+    case .IE_MB_PRESSED:
+        {
+            if e.mb == .RIGHT { // move
+                p := s.state_entities[ID].body
+                sposx := (e.click.x*SCREEN_WIDTH)*SCREEN_FACTOR-p.width/2
+                sposy := (e.click.y*SCREEN_HEIGHT)*SCREEN_FACTOR-p.height/2
+                send_pos := unapply_camera(s.camera,
+                    raylib.Vector2{sposx, sposy});
+                b := buffer_io.buffer_make(64)
+
+                // move msg
+                buffer_io.buffer_write_u8(&b,networking.MSG_USER_MSG);
+                buffer_io.buffer_write_u32(&b,ID);
+                buffer_io.buffer_write_u8(&b,game.USR_MSG_MOVE);
+                buffer_io.buffer_write_f32(&b,send_pos.x);
+                buffer_io.buffer_write_f32(&b,send_pos.y);
+                n, ok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint);
+                assert(ok == .None);
+                buffer_io.buffer_destroy(&b);
+            }
         }
     }
-    case:
-    }
-    state.player_velocity += player_disp;
 }
 get_dt :: proc() -> f32 {
     return raylib.GetFrameTime();
@@ -292,12 +309,65 @@ receiver_thread :: proc(s: ^State) {
 thread_receiver_fn :: proc(data: rawptr) {
     receiver_thread(transmute(^State)data);
 }
-thread_sender_fn :: proc(data: rawptr) {
-    // handle_sender_loop(transmute(^Game)data, 100);
+
+colors : []raylib.Color = {
+    raylib.LIGHTGRAY,
+    raylib.GRAY,
+    raylib.DARKGRAY,
+    raylib.YELLOW,
+    raylib.GOLD,
+    raylib.ORANGE,
+    raylib.PINK,
+    raylib.RED,
+    raylib.MAROON,
+    raylib.GREEN,
+    raylib.LIME,
+    raylib.DARKGREEN,
+    raylib.SKYBLUE,
+    raylib.BLUE,
+    raylib.DARKBLUE,
+    raylib.PURPLE,
+    raylib.VIOLET,
+    raylib.DARKPURPLE,
+    raylib.BEIGE,
+    raylib.BROWN,
+    raylib.DARKBROWN,
+    raylib.WHITE,
+    raylib.BLACK,
+    raylib.BLANK,
+    raylib.MAGENTA,
+    raylib.RAYWHITE,
+}
+tile_color_from_index :: proc(i: int) -> raylib.Color {
+    return colors[(i)%len(colors)];
 }
 
+draw_chunk :: proc(s: ^State, cid: game.v2i,c: ^game.Chunk) {
+    for i in 0..<game.CHUNK_SIZE { // rows
+        for j in 0..<game.CHUNK_SIZE { // cols
+            p := raylib.Vector2{};
+            p.x = f32(game.TILES_SIZE*(cid.x * game.CHUNK_SIZE + i))
+            p.y = f32(game.TILES_SIZE*(cid.y * game.CHUNK_SIZE + j))
+            p = apply_camera(s.camera, p) // cast to screen pos
+            b := raylib.Vector2{game.TILES_SIZE, game.TILES_SIZE};
+            // fmt.println(c.tiles[j][i],tile_color_from_index(int(c.tiles[j][i].tileset_index)));
+            index := int(c.tiles[j][i].tileset_index)%len(colors)
+            raylib.DrawRectangleV(p, b,
+                tile_color_from_index(index))
+            str := fmt.aprintf("%d", index,
+                allocator=s.frame_arena.block_allocator);
+            cstr := strings.clone_to_cstring(str,
+                      allocator=s.frame_arena.block_allocator)
+            w := raylib.MeasureTextEx(raylib.GetFontDefault(),cstr, 20, 1)
+            raylib.DrawText(cstr,
+                i32(p.x + game.TILES_SIZE/2 - w.x/2),
+                i32(p.y + game.TILES_SIZE/2 - w.y/2),
+                20, raylib.WHITE);
+        }
+    }
+}
 main :: proc() {
-    raylib.InitWindow(4*SCREEN_SCALE, 3*SCREEN_SCALE, "Hellope!");
+    raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!");
     raylib.SetTargetFPS(60);
     s := State{};
    s.assets = game.load_assets("imgs.json", load=true);
@@ -319,11 +389,17 @@ main :: proc() {
     mem.dynamic_arena_init(&s.frame_arena);
     f := raylib.LoadFont("font.ttf");
     s.camera = raylib.Rectangle{
-        4*SCREEN_SCALE, 3*SCREEN_SCALE,
-        player.body.x, player.body.y};
+        width=SCALED_SCREEN_WIDTH/2,height=SCALED_SCREEN_HEIGHT/2}
     i := 0;
     ping_id :u8= 0;
     pref : game.Entity
+    m := game.Map{};
+    m.chunks = make(map[game.v2i]game.Chunk);
+    m.seed = 420
+    m.octaves = 16
+    chunk := game.generate_chunck(&m, 0,0);
+    target := raylib.LoadRenderTexture(
+                i32(SCALED_SCREEN_WIDTH), i32(SCALED_SCREEN_HEIGHT))  // logical res
     // main loop
     for !raylib.WindowShouldClose() && s.connected {
         // copy entities
@@ -349,45 +425,40 @@ main :: proc() {
         for &k in events {
             handle_input(&k, &s);
         }
-        player.body.x += s.player_velocity.x * 100 * get_dt();
-        player.body.y += s.player_velocity.y * 100 * get_dt();
 
         // update camera
-        s.camera.x = pref.body.x - 4*SCREEN_SCALE/2 + pref.body.width/2;
-        s.camera.y = pref.body.y - 3*SCREEN_SCALE/2 + pref.body.height/2;
+        s.camera.x = pref.body.x - SCALED_SCREEN_WIDTH/2 + pref.body.width/2;
+        s.camera.y = pref.body.y - SCALED_SCREEN_HEIGHT/2 + pref.body.height/2;
 
-        raylib.BeginDrawing();
+        // game loop
+        // draw map to scaled
+        raylib.BeginTextureMode(target)
         raylib.ClearBackground(raylib.PURPLE);
+        draw_chunk(&s,game.v2i{0,0}, &chunk)
         for k, e in s.current_entities {
             c := e;
            draw_entity(&s, s.camera, &c);
         }
+        raylib.EndTextureMode()
+        raylib.BeginDrawing();
+        // draw game first
+        // scale up to screen
+        src  := raylib.Rectangle{0, 0, SCALED_SCREEN_WIDTH, -SCALED_SCREEN_HEIGHT}  // flipped Y
+        dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT} 
+        raylib.DrawTexturePro(target.texture, src, dest, {0,0}, 0, raylib.WHITE)
         { // i here conflicts with ping i
             i : i32= 0;
             for l in s.logs {
-                cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator);
-                raylib.DrawTextEx(f, cstr, raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);
+                cstr, err := strings.clone_to_cstring(l,
+                    s.frame_arena.block_allocator);
+                raylib.DrawTextEx(f, cstr,
+                    raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);
                 i += 1;
             }
         }
-        state_loop(&s);
+        // draw everything at 1:1 pixel scale
+
         raylib.EndDrawing();
-        clear(&events);
-        s.player_velocity = raylib.Vector2{0,0};
-        {
-            // send player to server
-            b := buffer_io.buffer_make(128);
-            buffer_io.buffer_write_u8(&b,networking.MSG_USER_DATA);
-            buffer_io.buffer_write_u32(&b,ID);
-            delta := game.EntityDelta{
-                texture=player.texture,
-                body=player.body,
-                status=player.status,
-            };
-            game.pack_entity(&b, &delta);
-            _, ok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint);
-            assert(ok == .None);
-        }
 
         i += 1;
         if i%30 == 0 {
@@ -407,6 +478,8 @@ main :: proc() {
            buffer_io.buffer_destroy(&b)
            ping_id+=1;
         }
+        state_loop(&s);
+        clear(&events);
     }
     s.connected = false;
     raylib.UnloadFont(f);

@@ -41,3 +41,19 @@ fbm :: proc(x, y: f32, octaves: int) -> f32 {
     }
     return value
 }
+seeded_fbm :: proc(x, y: f32, octaves: int, seed: int) -> f32 {
+    // Derive two large offsets from the seed so different seeds
+    // sample completely different regions of the noise field.
+    seed_x := f32(seed * 127 + 3491) * 0.1
+    seed_y := f32(seed * 311 + 7621) * 0.1
+
+    value    : f32 = 0
+    amplitude: f32 = 0.5
+    frequency: f32 = 1
+    for i in 0..<octaves {
+        value     += noise2d((x + seed_x) * frequency, (y + seed_y) * frequency) * amplitude
+        amplitude *= 0.5
+        frequency *= 2
+    }
+    return value
+}
