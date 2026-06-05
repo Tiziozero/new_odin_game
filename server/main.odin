@@ -225,11 +225,10 @@ check_client_map_collisions :: proc (g: ^Game, c: ^Client) {
     }
 
 }
-ENTITY_SPEED :: 80
 update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
     d := raylib.Vector2Normalize(c.move_to - c.move_origin)
     current_pos := game.rect_pos(c.entity.body)
-    next_pos := current_pos + d * ENTITY_SPEED * dt
+    next_pos := current_pos + d * game.ENTITY_SPEED * dt
 
     reached := raylib.Vector2Distance(current_pos, c.move_to) <=
                raylib.Vector2Distance(current_pos, next_pos)

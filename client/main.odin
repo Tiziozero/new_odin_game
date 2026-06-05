@@ -438,11 +438,31 @@ main :: proc() {
                 i32(SCREEN_WIDTH), i32(SCREEN_HEIGHT))  // logical res
     // main loop
     for !raylib.WindowShouldClose() && s.connected {
+        dt := raylib.GetFrameTime();
         // copy entities
-        clear_map(&s.current_entities)
+        // clear_map(&s.current_entities)
         sync.lock(&s.entities_lock);
         for k, e in s.state_entities {
-            s.current_entities[k] = e
+            copy := e;
+            current, ok := s.current_entities[k];
+            if !ok {
+                fmt.println("New entity from server:", e);
+            } else {
+                new_pos: raylib.Vector2;
+                // lerp positions
+                p1 := game.rect_pos(current.body)
+                p2 := game.rect_pos(copy.body)
+                if raylib.Vector2Distance(p1, p2) > game.ENTITY_SPEED*dt {
+                    d := raylib.Vector2Normalize(p2 - p1)
+                    new_pos = p1 + d*game.ENTITY_SPEED*dt
+                } else {
+                    // copy body over
+                    new_pos = p2;
+                }
+                copy.body.x = new_pos.x
+                copy.body.y = new_pos.y
+            }
+            s.current_entities[k] = copy
         }
         sync.unlock(&s.entities_lock);
         // get player info

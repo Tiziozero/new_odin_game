@@ -1,5 +1,6 @@
 package game
 CELLS := 80;
+ENTITY_SPEED :: 80
 import "core:strings"
 
 import "core:os"
