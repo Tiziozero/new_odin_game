@@ -214,20 +214,11 @@ check_client_map_collisions :: proc (g: ^Game, c: ^Client) {
         for y in -1..=1 {
             chunk_i := game.v2i{x=chunck_i_x+x, y=chunck_i_y+y};
              chunk := game.map_get_chunk(&g.gmap, chunk_i)
-             for r, rk in chunk.tiles {
-                 for t, rt in r {
-                     if t.collidable {
-                         if game.entity_wall_collision(&c.entity.body,
-                             & raylib.Rectangle{
-                                 f32(((chunck_i_x+x)*game.CHUNK_SIZE + rt)*game.TILES_SIZE),
-                                 f32(((chunck_i_y+y)*game.CHUNK_SIZE + rk)*game.TILES_SIZE),
-                                 game.TILES_SIZE,
-                                 game.TILES_SIZE}
-) {
-                             // make it so that it stops moving at collision with wall.
-                             c.move_to = game.rect_pos(c.entity.body);
-                         }
-                     }
+             for t in chunk.collidables {
+                 wall := t
+                 // make it so that it stops moving at collision with wall.
+                 if game.entity_wall_collision(&c.entity.body, &wall) {
+                     c.move_to = game.rect_pos(c.entity.body);
                  }
              }
         }

@@ -1,5 +1,6 @@
 package game
 import "core:fmt"
+import "vendor:raylib"
 MapItem :: struct {
 }
 
@@ -11,7 +12,6 @@ Map :: struct {
     octaves: int,
 }
 Tile :: struct {
-    collidable: bool,
     tileset_index: u16,
 }
 CHUNK_SIZE :: 32
@@ -20,20 +20,29 @@ CHUNK_GEN_POS_FACTOR :: 12
 CHUNK_SIDE_SIZE :: CHUNK_SIZE*TILES_SIZE
 Chunk :: struct {
     tiles: [CHUNK_SIZE][CHUNK_SIZE]Tile,
+    collidables: [dynamic]raylib.Rectangle,
 }
 generate_chunck :: proc(m: ^Map, x, y: int) -> Chunk {
     tile_x := x * CHUNK_SIZE
     tile_y := y * CHUNK_SIZE
     chunk := Chunk{}
-    for i in 0..<CHUNK_SIZE {
-        for j in 0..<CHUNK_SIZE {
+    chunk.collidables = make([dynamic]raylib.Rectangle)
+    for i in 0..<CHUNK_SIZE { // col
+        for j in 0..<CHUNK_SIZE { // row
             t := Tile{}
             f := seeded_fbm(
                        f32(tile_x + i)/CHUNK_GEN_POS_FACTOR,
                        f32(tile_y + j)/CHUNK_GEN_POS_FACTOR, m.octaves, m.seed)
             c := u16(10*0.5*(f + 1));
             t.tileset_index = c
-            t.collidable = c >= 7
+            if c >= 7 {
+                append(&chunk.collidables, raylib.Rectangle{
+                    x=f32((tile_x + i)*TILES_SIZE),
+                    y=f32((tile_y + j)*TILES_SIZE),
+                    width=TILES_SIZE,
+                    height=TILES_SIZE,
+                })
+            }
             chunk.tiles[j][i] = t;
             // fmt.println(f, c, c>=7);
         }

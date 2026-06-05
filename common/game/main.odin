@@ -123,6 +123,7 @@ load_assets :: proc(config_path: string, load:=false, allocator:=context.allocat
         t : raylib.Texture2D
         if load {
             t = raylib.LoadTexture(cstr);
+            fmt.println("texture id for", cstr, ":", t.id)
         } 
         am.assets[i] = Asset {
             img = k.img,
@@ -131,9 +132,6 @@ load_assets :: proc(config_path: string, load:=false, allocator:=context.allocat
             width = k.width,
             texture = t,
         }
-        fmt.println("freeing", k.img);
-        // delete(cstr)
-        fmt.println("freed", k.img);
     }
     return am
 }

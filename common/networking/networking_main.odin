@@ -14,8 +14,12 @@ MSG_PING_RESPOND :: 6;
 MSG_GAME_DATA :: 7;
 MSG_USER_DATA :: 8;
 MSG_USER_MSG :: 9;
+// ADDR :: "172.31.138.162";
+// SERVER_ENDPOINT :: "172.31.138.162:8081";
+ADDR :: "127.0.0.1";
+SERVER_ENDPOINT :: "127.0.0.1:8081";
 init_udp_socket :: proc(port := 0) -> (net.UDP_Socket, net.Network_Error) {
-    sock_addr := net.parse_address("127.0.0.1", false);
+    sock_addr := net.parse_address(ADDR, false);
     socket, err := net.make_bound_udp_socket(sock_addr, port);
     if err != net.Create_Socket_Error.None {
         fmt.println("Error in creating udp socket.", err);
