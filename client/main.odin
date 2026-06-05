@@ -41,6 +41,7 @@ State :: struct {
     ping: f32,
     pings: map[u8]time.Time,
     draws: [dynamic]DrawCommand,
+    toggle_views: bool
 };
 InputHandler :: struct {
     action: proc(game: ^State),
@@ -164,13 +165,14 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
             if SCREEN_FACTOR < 1 { SCREEN_FACTOR = 1 }
             if SCREEN_FACTOR > 4 { SCREEN_FACTOR = 4 }
         }
-    case .IE_KEY_DOWN:
+    case .IE_KEY_PRESSED:
         {
             #partial switch e.k {
             case .A: fmt.println("a");
             case .D: fmt.println("d");
             case .W: fmt.println("w");
             case .S: fmt.println("s");
+            case .T: s.toggle_views = !s.toggle_views
             case:
             }
         }
@@ -503,8 +505,8 @@ main :: proc() {
         s.camera.x = pref.body.x - SCREEN_WIDTH/2 + pref.body.width/2;
         s.camera.y = pref.body.y - SCREEN_HEIGHT/2 + pref.body.height/2;
         // not since all draw calls are scaled
-        s.camera.width =    200
-        s.camera.height =   200
+        s.camera.width =    SCALED_SCREEN_WIDTH()
+        s.camera.height =   SCALED_SCREEN_HEIGHT()
 
         // game loop
         // draw map to scaled
@@ -522,7 +524,7 @@ main :: proc() {
         //  
         raylib.BeginTextureMode(target)
         raylib.ClearBackground(raylib.PURPLE);
-        flush_draws(&s)
+        flush_draws_2(&s)
         raylib.EndTextureMode()
         raylib.BeginDrawing();
         {
@@ -531,15 +533,18 @@ main :: proc() {
             x :f32= SCREEN_WIDTH*0.5 *(SCREEN_FACTOR-1)
             y :f32= SCREEN_HEIGHT*0.5 *(SCREEN_FACTOR-1)
             src  := raylib.Rectangle{0+x, 3*SCREEN_HEIGHT-y, SCREEN_WIDTH,   -SCREEN_HEIGHT}  // flipped Y
-            // src  = raylib.Rectangle{0,0,SCREEN_WIDTH*4,    -SCREEN_HEIGHT*4}
-            fmt.println(src, SCREEN_FACTOR)
+            osrc := src
+            if s.toggle_views { 
+                src  = raylib.Rectangle{0,0,SCREEN_WIDTH*4,    -SCREEN_HEIGHT*4}
+            }
             dest := raylib.Rectangle{0, 0, SCREEN_WIDTH,    SCREEN_HEIGHT} 
             raylib.DrawTexturePro(target.texture, src, dest, {0,0}, 0, raylib.WHITE)
+            src = osrc
+            raylib.DrawRectangle(i32(src.x/4),i32(src.y/4), SCREEN_WIDTH/4,SCREEN_HEIGHT/4, raylib.WHITE)
         }
-        raylib.EndTextureMode()
         { // i here conflicts with ping i
             i : i32= 0;
-            h :f32= f32(len(s.logs) * 24 + 10)
+            h :f32= f32(len(s.logs) * 24 + 10 + 20)
             draw_rect_no_scale(&s, pos={0,0}, size={200,h}, tint={0,0,0,123});
             for l in s.logs {
                 cstr, err := strings.clone_to_cstring(l,

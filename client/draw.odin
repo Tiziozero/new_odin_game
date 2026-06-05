@@ -99,6 +99,45 @@ flush_draws :: proc(s: ^State) {
     }
     clear(&s.draws)
 }
+flush_draws_2 :: proc(s: ^State) {
+    vis := visible_rect()
+    for cmd in s.draws {
+        draw_command_2(s, cmd, vis)
+    }
+    clear(&s.draws)
+}
+// skips what's outside
+draw_command_2 :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
+    switch c in cmd {
+    case DrawTextCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        measured := text_measure(c.text, c.size * factor, c.font, c.spacing)
+        b := raylib.Rectangle{c.pos.x * factor, c.pos.y * factor, measured.x, measured.y}
+        if c.no_scale || rect_overlaps(b, vis) { draw_command_text(s, c) }
+
+    case DrawSpriteCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        b := raylib.Rectangle{c.pos.x * factor, c.pos.y * factor,
+                               c.size.x * factor, c.size.y * factor}
+        if c.no_scale || rect_overlaps(b, vis) { draw_command_sprite(s, c) }
+
+    case DrawSpriteSrcCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        b := raylib.Rectangle{
+            c.body.x * factor, c.body.y * factor,
+            c.body.width * factor, c.body.height * factor,
+        }
+        if c.no_scale || rect_overlaps(b, vis) { draw_command_sprite_src(s, c) }
+
+    case DrawRectCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        b := raylib.Rectangle{
+            c.body.x * factor, c.body.y * factor,
+            c.body.width * factor, c.body.height * factor,
+        }
+        if c.no_scale || rect_overlaps(b, vis) { draw_command_rect(s, c) }
+    }
+}
 
 draw_command :: proc(s: ^State, cmd: DrawCommand) {
     switch c in cmd {
@@ -250,4 +289,24 @@ draw_command_rect :: proc(s: ^State, cmd: DrawRectCommand) {
         cmd.body.height * factor,
     }
     raylib.DrawRectangleRec(body, cmd.tint)
+}
+// in draw.odin or wherever flush_draws lives
+
+visible_rect :: proc() -> raylib.Rectangle {
+    x := f32(SCREEN_WIDTH)  * 0.5 * (SCREEN_FACTOR - 1)
+    y := f32(SCREEN_HEIGHT) * 0.5 * (SCREEN_FACTOR - 1)
+    // src used flipped Y, so the top-left in logical space is (x, y)
+    return raylib.Rectangle{
+        x      = x,
+        y      = y,
+        width  = f32(SCREEN_WIDTH),
+        height = f32(SCREEN_HEIGHT),
+    }
+}
+
+rect_overlaps :: proc(a, b: raylib.Rectangle) -> bool {
+    return a.x < b.x + b.width  &&
+           a.x + a.width  > b.x &&
+           a.y < b.y + b.height &&
+           a.y + a.height > b.y
 }
