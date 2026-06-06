@@ -102,24 +102,43 @@ flush_draws :: proc(s: ^State) {
 flush_draws_2 :: proc(s: ^State) {
     vis := visible_rect()
     for cmd in s.draws {
-        draw_command_2(s, cmd, vis)
-    }
+        draw_command_2(s, cmd, vis) }
     clear(&s.draws)
 }
-// skips what's outside
+// skips what's outside + move to top left
 draw_command_2 :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
+    x :f32= SCREEN_WIDTH*0.5*(1-1/SCREEN_FACTOR)
+    y :f32= SCREEN_HEIGHT*0.5*(1-1/SCREEN_FACTOR)
     switch c in cmd {
     case DrawTextCommand:
         factor := SCREEN_FACTOR if !c.no_scale else 1.0
         measured := text_measure(c.text, c.size * factor, c.font, c.spacing)
         b := raylib.Rectangle{c.pos.x * factor, c.pos.y * factor, measured.x, measured.y}
-        if c.no_scale || rect_overlaps(b, vis) { draw_command_text(s, c) }
+        if c.no_scale { // don't move, scale is 1
+            draw_command_text(s, c)
+        } else {
+            if rect_overlaps(b, vis) { // if it's visible then move
+                copy : DrawTextCommand = c
+                copy.pos -= {x,y}
+                // sub x/y from it
+                draw_command_text(s, copy)
+            }
+        }
 
     case DrawSpriteCommand:
         factor := SCREEN_FACTOR if !c.no_scale else 1.0
         b := raylib.Rectangle{c.pos.x * factor, c.pos.y * factor,
                                c.size.x * factor, c.size.y * factor}
-        if c.no_scale || rect_overlaps(b, vis) { draw_command_sprite(s, c) }
+        if c.no_scale {
+            draw_command_sprite(s, c)
+        } else {
+            if rect_overlaps(b, vis) {
+                copy : DrawSpriteCommand = c
+                copy.pos -= {x,y}
+                // sub x/y from it
+                draw_command_sprite(s, copy)
+            }
+        }
 
     case DrawSpriteSrcCommand:
         factor := SCREEN_FACTOR if !c.no_scale else 1.0
@@ -127,7 +146,17 @@ draw_command_2 :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
             c.body.x * factor, c.body.y * factor,
             c.body.width * factor, c.body.height * factor,
         }
-        if c.no_scale || rect_overlaps(b, vis) { draw_command_sprite_src(s, c) }
+        if c.no_scale {
+            draw_command_sprite_src(s, c)
+        } else {
+            if rect_overlaps(b, vis) {
+                copy : DrawSpriteSrcCommand = c
+                copy.body.x -= x
+                copy.body.y -= y
+                // sub x/y from it
+                draw_command_sprite_src(s, copy)
+            }
+        }
 
     case DrawRectCommand:
         factor := SCREEN_FACTOR if !c.no_scale else 1.0
@@ -135,7 +164,17 @@ draw_command_2 :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
             c.body.x * factor, c.body.y * factor,
             c.body.width * factor, c.body.height * factor,
         }
-        if c.no_scale || rect_overlaps(b, vis) { draw_command_rect(s, c) }
+        if c.no_scale {
+            draw_command_rect(s, c)
+        } else {
+            if rect_overlaps(b, vis) {
+                copy : DrawRectCommand = c
+                copy.body.x -= x
+                copy.body.y -= y
+                // sub x/y from it
+                draw_command_rect(s, copy)
+            }
+        }
     }
 }
 

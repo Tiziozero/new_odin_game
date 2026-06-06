@@ -129,6 +129,7 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
         panic("body is fucked");
     }
     // raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.RED);
+    draw_rect(s, p, game.rect_size(e.body), raylib.RED)
     width := f32(s.assets.assets[e.texture].texture.width)
     height := f32(s.assets.assets[e.texture].texture.height)
     // src:=raylib.Rectangle{ x=0,y=0, width=width, height=height }
@@ -421,7 +422,7 @@ main :: proc() {
     raylib.SetTargetFPS(60);
     tiles = raylib.LoadTexture("imgs/ts1.png")
     s := State{};
-   s.assets = game.load_assets("imgs.json", load=true);
+   s.assets = game.load_assets("imgs.json", load=false);
    if init_game_con(&s) != 0 {
         return;
     }
@@ -454,7 +455,7 @@ main :: proc() {
     chunk := game.generate_chunck(&m, 0,0);
     chunk11 := game.generate_chunck(&m, 1,1);
     target := raylib.LoadRenderTexture(
-                i32(SCREEN_WIDTH)*4, i32(SCREEN_HEIGHT)*4)  // logical res
+                i32(SCREEN_WIDTH), i32(SCREEN_HEIGHT)) // copy
     // main loop
     for !raylib.WindowShouldClose() && s.connected {
         dt := raylib.GetFrameTime();
@@ -533,14 +534,15 @@ main :: proc() {
             x :f32= SCREEN_WIDTH*0.5 *(SCREEN_FACTOR-1)
             y :f32= SCREEN_HEIGHT*0.5 *(SCREEN_FACTOR-1)
             src  := raylib.Rectangle{0+x, 3*SCREEN_HEIGHT-y, SCREEN_WIDTH,   -SCREEN_HEIGHT}  // flipped Y
+            src  = raylib.Rectangle{0, 0, SCREEN_WIDTH,   -SCREEN_HEIGHT}  // flipped Y
             osrc := src
-            if s.toggle_views { 
+            if s.toggle_views && false { 
                 src  = raylib.Rectangle{0,0,SCREEN_WIDTH*4,    -SCREEN_HEIGHT*4}
             }
             dest := raylib.Rectangle{0, 0, SCREEN_WIDTH,    SCREEN_HEIGHT} 
             raylib.DrawTexturePro(target.texture, src, dest, {0,0}, 0, raylib.WHITE)
             src = osrc
-            raylib.DrawRectangle(i32(src.x/4),i32(src.y/4), SCREEN_WIDTH/4,SCREEN_HEIGHT/4, raylib.WHITE)
+            // raylib.DrawRectangle(i32(src.x/4),i32(src.y/4), SCREEN_WIDTH/4,SCREEN_HEIGHT/4, raylib.WHITE)
         }
         { // i here conflicts with ping i
             i : i32= 0;
