@@ -93,7 +93,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         }
         buffer_io.buffer_destroy(&b);
     } else if msg == networking.MSG_PING {
-        fmt.print("ping ");
+        // fmt.print("ping ");
         id, ok := buffer_io.buffer_read_u32(buf);
         if !ok {
             panic("Failed to read u32, user id for connect");
@@ -103,7 +103,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
             panic("Failed to read u32, ping id for connect");
         }
         
-        fmt.println("from", id, "pinng id", ping_id);
+        // fmt.println("from", id, "pinng id", ping_id);
 
         // update last ping
         sync.mutex_lock(&g.entities_lock);
@@ -158,7 +158,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
                 last.move_to.y = new_y
                 last.move_origin.x = last.entity.body.x
                 last.move_origin.y = last.entity.body.y
-                fmt.println(last.move_to, last.move_origin)
+                // fmt.println(last.move_to, last.move_origin)
                 g.entities[id] = last;
                 sync.unlock(&g.entities_lock);
             }
@@ -206,25 +206,7 @@ pack_game_loop_data :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
         game.pack_entity(buf, &delta);
     }
 }
-check_client_map_collisions :: proc (g: ^Game, c: ^Client) {
-    // get entities map
-    chunck_i_x := int(c.entity.body.x / game.CHUNK_SIDE_SIZE);
-    chunck_i_y := int(c.entity.body.y / game.CHUNK_SIDE_SIZE);
-    for x in -1..=1 {
-        for y in -1..=1 {
-            chunk_i := game.v2i{x=chunck_i_x+x, y=chunck_i_y+y};
-             chunk := game.map_get_chunk(&g.gmap, chunk_i)
-             for t in chunk.collidables {
-                 wall := t
-                 // make it so that it stops moving at collision with wall.
-                 if game.entity_wall_collision(&c.entity.body, &wall) {
-                     c.move_to = game.rect_pos(c.entity.body);
-                 }
-             }
-        }
-    }
 
-}
 update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
     d := raylib.Vector2Normalize(c.move_to - c.move_origin)
     current_pos := game.rect_pos(c.entity.body)
@@ -237,7 +219,12 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
 
     c.entity.body.x = target.x
     c.entity.body.y = target.y
-    check_client_map_collisions(g, c);
+    if  v, ok := game.check_entity_map_collisions(&g.gmap, c.entity); ok {
+        fmt.println("Collision");
+        c.entity.body.x = v.x
+        c.entity.body.y = v.y
+        c.move_to = game.rect_pos(c.entity.body)
+    }
 }
 MAX_TIMEOUT :: 10
 handle_sender_loop :: proc(g: ^Game, n: int) {

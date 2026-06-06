@@ -139,27 +139,48 @@ load_assets :: proc(config_path: string, load:=false, allocator:=context.allocat
 /*
 The key insight is push out on the shallowest overlap axis — if you're barely clipping a wall on the left but deeply overlapping on the top, you're hitting the side, not the top. Resolving the smaller overlap is almost always correct.
    */
-entity_wall_collision :: proc(body, wall: ^raylib.Rectangle) -> bool {
+entity_wall_collision :: proc(body, wall: raylib.Rectangle) -> (raylib.Vector2,bool) {
     // horizontal overlap
-    if !raylib.CheckCollisionRecs(body^, wall^) do return false;
+    if !raylib.CheckCollisionRecs(body, wall) do return {},false;
 
     // compute overlap on each axis
     overlap_x := min(body.x + body.width,  wall.x + wall.width)  - max(body.x, wall.x)
     overlap_y := min(body.y + body.height, wall.y + wall.height) - max(body.y, wall.y)
 
+    r := rect_pos(body)
     // push out on shallowest axis
     if overlap_x < overlap_y {
         if body.x < wall.x {
-            body.x -= overlap_x
+            r.x = body.x - overlap_x
         } else {
-            body.x += overlap_x
+            r.x = body.x + overlap_x
         }
     } else {
         if body.y < wall.y {
-            body.y -= overlap_y
+            r.y = body.y - overlap_y
         } else {
-            body.y += overlap_y
+            r.y = body.y + overlap_y
         }
     }
-    return true;
+    return r, true;
+}
+// returns position to move to
+check_entity_map_collisions :: proc (m: ^Map, entity: Entity) -> (raylib.Vector2, bool){
+    // get entities map
+    chunck_i_x := int(entity.body.x / CHUNK_SIDE_SIZE);
+    chunck_i_y := int(entity.body.y / CHUNK_SIDE_SIZE);
+    for x in -1..=1 {
+        for y in -1..=1 {
+            chunk_i := v2i{x=chunck_i_x+x, y=chunck_i_y+y};
+             chunk := map_get_chunk(m, chunk_i)
+             for t in chunk.collidables {
+                 // make it so that it stops moving at collision with wall.
+                 if v, ok := entity_wall_collision(entity.body, t); ok {
+                     fmt.println(v)
+                     return v, true
+                 }
+             }
+        }
+    }
+    return {}, false
 }
