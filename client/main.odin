@@ -1,6 +1,11 @@
 package main
 
 SCREEN_FACTOR := f32(2.0)
+MIN_ODIN :: "dev-2026-06"
+
+when ODIN_VERSION < MIN_ODIN {
+    #panic("Requires odin dev-2026-06")
+}
 
 import "core:fmt"
 import "core:math/rand"
@@ -88,7 +93,7 @@ rl_to_game :: proc(events: ^[dynamic]InputEvent) {
                     kind  = .IE_MB_PRESSED,
                     mb    = mb,
                     click = raylib.GetMousePosition(
-                        
+
                     ) / raylib.Vector2{SCREEN_WIDTH, SCREEN_HEIGHT}, // 0 to 1
                 },
             )
@@ -140,9 +145,9 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     // w := raylib.MeasureText(cstr, 20)
 
     /* tpos := apply_camera(camera,
-game.rect_pos(e.body) + game.rect_size(e.body)*0.5 -
-(e.body.height/2+20)*raylib.Vector2{0,1} -
-raylib.Vector2{f32(w)/2, 0});*/
+       game.rect_pos(e.body) + game.rect_size(e.body)*0.5 -
+       (e.body.height/2+20)*raylib.Vector2{0,1} -
+       raylib.Vector2{f32(w)/2, 0});*/
 
     tpos := apply_camera(
         camera,
@@ -384,8 +389,8 @@ tile_color_from_index :: proc(i: int) -> raylib.Color {
 tiles: raylib.Texture2D
 
 draw_chunk :: proc(s: ^State, cid: game.v2i, c: ^game.Chunk) {
-    for i in 0 ..< game.CHUNK_SIZE {     // rows
-        for j in 0 ..< game.CHUNK_SIZE {     // cols
+    for i in 0 ..< game.CHUNK_SIZE {     // rows/y
+        for j in 0 ..< game.CHUNK_SIZE {     // cols/x
             p := raylib.Vector2{}
             p.x = f32(game.TILES_SIZE * (cid.x * game.CHUNK_SIZE + i))
             p.y = f32(game.TILES_SIZE * (cid.y * game.CHUNK_SIZE + j))
@@ -395,11 +400,11 @@ draw_chunk :: proc(s: ^State, cid: game.v2i, c: ^game.Chunk) {
             t := c.tiles[j][i]
             index := t.n
             /*raylib.DrawRectangleV(p, b,
-tile_color_from_index(index))*/
+              tile_color_from_index(index))*/
             draw_sprite_src_rect(s, tiles, src = t.src_rect, body = {p.x, p.y, b.x, b.y})
             str := fmt.aprintf("%d", index, allocator = s.frame_arena.block_allocator)
             /* cstr := strings.clone_to_cstring(str,
-allocator=s.frame_arena.block_allocator)*/
+               allocator=s.frame_arena.block_allocator)*/
             // w := raylib.MeasureTextEx(raylib.GetFontDefault(),cstr, 20, 1)
             draw_text_center(
                 s,
@@ -408,16 +413,27 @@ allocator=s.frame_arena.block_allocator)*/
                 size = 20,
             )
             /*raylib.DrawText(cstr,
-i32(p.x + game.TILES_SIZE/2 - w.x/2),
-i32(p.y + game.TILES_SIZE/2 - w.y/2),
-20, raylib.WHITE);*/
+              i32(p.x + game.TILES_SIZE/2 - w.x/2),
+              i32(p.y + game.TILES_SIZE/2 - w.y/2),
+              20, raylib.WHITE);*/
+        }
+    }
+    b : raylib.Vector2
+    for d in c.drawables {
+        switch w in d {
+        case game.WallDrawable:
+            b = apply_camera(s.camera, game.rect_pos(w.rect));
+            draw_sprite_src_rect(s, tiles, src = w.src_rect,
+                body = {b.x, b.y, w.width, w.height})
+        case game.RockDrawable: 
+            panic("Impl");
         }
     }
 }
 main :: proc() {
     raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
     raylib.SetTargetFPS(60)
-    tiles = raylib.LoadTexture("imgs/ts3.png")
+    tiles = raylib.LoadTexture("imgs/ts4.png")
     s := State{}
     s.toggle_views = true
     s.assets = game.load_assets("imgs.json", load = false)
@@ -450,7 +466,8 @@ main :: proc() {
     _m.octaves = 16
     s.gmap = _m;
     target := raylib.LoadRenderTexture(i32(SCREEN_WIDTH) * 4, i32(SCREEN_HEIGHT) * 4) // copy
-    // main loop
+                                                                                      // main loop
+    fmt.println(ODIN_VERSION)
     for !raylib.WindowShouldClose() && s.connected {
         dt := raylib.GetFrameTime()
         // copy entities
@@ -654,7 +671,7 @@ main :: proc() {
                     font = f,
                 )
                 /*raylib.DrawTextEx(f, cstr,
-raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);*/
+                  raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);*/
                 i += 1
             }
         }

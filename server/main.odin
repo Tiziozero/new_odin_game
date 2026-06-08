@@ -10,6 +10,11 @@ import "core:fmt"
 import "project:common/game"
 import "project:common/networking"
 import "project:common/buffer_io"
+MIN_ODIN :: "dev-2026-06"
+
+when ODIN_VERSION < MIN_ODIN {
+    #panic("Requires odin dev-2026-06")
+}
 
 
 

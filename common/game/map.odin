@@ -17,8 +17,25 @@ WallNeighbours :: bit_set[WallNeighbour; u8]
 
 Tile :: struct {
     n: u16,
-    wall_neighbours: WallNeighbours, // only meaningful if this tile is a wall
+    using rect: raylib.Rectangle,
+    // wall_neighbours: WallNeighbours, // only meaningful if this tile is a wall
     src_rect: raylib.Rectangle,
+}
+Drawable :: union {
+    WallDrawable,
+    RockDrawable,
+}
+WallDrawable :: struct {
+    ts: int,
+    using rect: raylib.Rectangle,
+    src_rect: raylib.Rectangle,
+}
+RockDrawable :: struct {
+    ts: int,
+    src_rect: raylib.Rectangle,
+}
+Collidable :: struct {
+    using rect: raylib.Rectangle,
 }
 CHUNK_SIZE :: 32
 TILES_SIZE :: 32
@@ -26,26 +43,34 @@ CHUNK_GEN_POS_FACTOR :: 12
 CHUNK_SIDE_SIZE :: CHUNK_SIZE*TILES_SIZE
 Chunk :: struct {
     tiles: [CHUNK_SIZE][CHUNK_SIZE]Tile,
-    collidables: [dynamic]raylib.Rectangle,
+    collidables: [dynamic]Collidable,
+    drawables: [dynamic]Drawable,
 }
 generate_chunck :: proc(m: ^Map, x, y: int) -> Chunk {
     tile_x := x * CHUNK_SIZE
     tile_y := y * CHUNK_SIZE
     chunk := Chunk{}
-    chunk.collidables = make([dynamic]raylib.Rectangle)
-    for i in 0..<CHUNK_SIZE { // col
-        for j in 0..<CHUNK_SIZE { // row
+    chunk.collidables = make([dynamic]Collidable)
+    for j in 0..<CHUNK_SIZE { // row/y
+        for i in 0..<CHUNK_SIZE { // col/x
             t := Tile{}
             c := tile_index_at(m, tile_x+i, tile_y+j);
             t.n = c
             if c >= 7 {
-                append(&chunk.collidables, raylib.Rectangle{
+                wall_neighbours := wall_neighbours_for(m,tile_x + i, tile_y + j)
+                append(&chunk.collidables, Collidable{
                     x=f32((tile_x + i)*TILES_SIZE),
                     y=f32((tile_y + j)*TILES_SIZE),
                     width=TILES_SIZE,
                     height=TILES_SIZE,
                 })
-                t.wall_neighbours = wall_neighbours_for(m,tile_x + i, tile_y + j)
+                append(&chunk.drawables, WallDrawable{
+                    x=f32((tile_x + i)*TILES_SIZE),
+                    y=f32((tile_y + j)*TILES_SIZE),
+                    width=TILES_SIZE,
+                    height=TILES_SIZE,
+                    src_rect = get_ts_src_for_wall(wall_neighbours)
+                })
             }
             t.src_rect = get_ts_src_for_tile(t)
             chunk.tiles[j][i] = t;
@@ -55,14 +80,18 @@ generate_chunck :: proc(m: ^Map, x, y: int) -> Chunk {
     m.chunks[v2i{x,y}] = chunk;
     return chunk
 }
-all4 := raylib.Rectangle{3*16, 0, 16, 15}
-ltr := raylib.Rectangle{0, 0, 16, 15}
-rt := raylib.Rectangle{16 ,0, 16, 15}
-lt := raylib.Rectangle{2*16, 0, 16, 15}
-grount_t_1 := raylib.Rectangle{0, 16, 16, 15}
-grount_t_2 := raylib.Rectangle{1*16, 16, 16, 15}
-grount_t_3 := raylib.Rectangle{2*16, 16, 16, 15}
-grount_t_4 := raylib.Rectangle{3*16, 16, 16, 15}
+ltr := raylib.Rectangle{0, 0, 16, 16}
+lt := raylib.Rectangle{16 ,0, 16, 16}
+rt := raylib.Rectangle{2*16, 0, 16, 16}
+t := raylib.Rectangle{3*16, 0, 16, 16}
+grount_t_1 := raylib.Rectangle{0, 16, 16, 16}
+grount_t_2 := raylib.Rectangle{1*16, 16, 16, 16}
+grount_t_3 := raylib.Rectangle{2*16, 16, 16, 16}
+grount_t_4 := raylib.Rectangle{3*16, 16, 16, 16}
+trbl_1 := raylib.Rectangle{0*16, 2*16, 16, 16}
+trbl_2 := raylib.Rectangle{1*16, 2*16, 16, 16}
+trbl_3 := raylib.Rectangle{2*16, 2*16, 16, 16}
+trbl_4 := raylib.Rectangle{3*16, 2*16, 16, 16}
 random_ground_tile :: proc() -> raylib.Rectangle {
     switch rand.int31() % 4 {
     case 0: return grount_t_1
@@ -71,22 +100,35 @@ random_ground_tile :: proc() -> raylib.Rectangle {
     case : return grount_t_4
     }
 }
-get_ts_src_for_tile ::  proc(t: Tile) -> raylib.Rectangle {
-    if tile_is_wall(t.n) {
-        switch t.wall_neighbours {
-        case {.West,.East}:fallthrough
-        case {.North,.West,.East}:
-            return ltr
-        case {.East}:fallthrough
-        case {.North,.East}:
-            return rt
-        case {.West}:fallthrough
-        case {.North,.West}:
-            return lt
-        case: return all4
-        }
+random_trbl_tile :: proc() -> raylib.Rectangle {
+    switch rand.int31() % 4 {
+    case 0: return  trbl_1
+    case 1: return  trbl_2
+    case 2: return  trbl_3
+    case : return   trbl_4
     }
+}
+get_ts_src_for_tile ::  proc(t: Tile) -> raylib.Rectangle {
     return random_ground_tile()
+}
+get_ts_src_for_wall :: proc(n: WallNeighbours) ->raylib.Rectangle {
+    if .South in n { return random_trbl_tile() }
+    switch n {
+    case {.West,.East}:fallthrough
+    case {.North,.West,.East}:
+        return ltr
+    case {.East}:fallthrough
+    case {.North,.East}:
+        return lt
+    case {.West}:fallthrough
+    case {.North,.West}:
+        return rt
+    case {.North}: fallthrough
+    case {}: return t
+    case: fmt.println(n); panic("handle case for walls");
+    }
+    fmt.println(n);
+    panic("What");
 }
 map_get_chunk :: proc(m :^Map, i: v2i) -> ^Chunk {
     c, ok := &m.chunks[i];
