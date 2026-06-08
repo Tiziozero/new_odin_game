@@ -8,6 +8,7 @@ when ODIN_VERSION < MIN_ODIN {
 }
 
 import "core:fmt"
+import "core:slice"
 import "core:math/rand"
 import "core:mem"
 import "core:net"
@@ -160,13 +161,15 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     draw_text_center(s, text = str, pos = tpos, size = 20, spacing = 5)
     // delete(cstr);
 }
+MAX_ZOOM_FACTOR :: 8
+MOUSE_DELTA :: 25
 handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
     case .IE_SCROLL:
         {
-            SCREEN_FACTOR += e.scroll_delta / 100
+            SCREEN_FACTOR += e.scroll_delta / MOUSE_DELTA
             if SCREEN_FACTOR < 1 {SCREEN_FACTOR = 1}
-            if SCREEN_FACTOR > 4 {SCREEN_FACTOR = 4}
+            if SCREEN_FACTOR > MAX_ZOOM_FACTOR {SCREEN_FACTOR = MAX_ZOOM_FACTOR}
         }
     case .IE_KEY_PRESSED:
         {
@@ -387,53 +390,30 @@ tile_color_from_index :: proc(i: int) -> raylib.Color {
 }
 
 tiles: raylib.Texture2D
-
-draw_chunk :: proc(s: ^State, cid: game.v2i, c: ^game.Chunk) {
-    for i in 0 ..< game.CHUNK_SIZE {     // rows/y
-        for j in 0 ..< game.CHUNK_SIZE {     // cols/x
-            p := raylib.Vector2{}
-            p.x = f32(game.TILES_SIZE * (cid.x * game.CHUNK_SIZE + i))
-            p.y = f32(game.TILES_SIZE * (cid.y * game.CHUNK_SIZE + j))
-            p = apply_camera(s.camera, p) // cast to screen pos
-            b := raylib.Vector2{game.TILES_SIZE, game.TILES_SIZE}
-            // fmt.println(c.tiles[j][i],tile_color_from_index(int(c.tiles[j][i].tileset_index)));
-            t := c.tiles[j][i]
-            index := t.n
-            /*raylib.DrawRectangleV(p, b,
-              tile_color_from_index(index))*/
-            draw_sprite_src_rect(s, tiles, src = t.src_rect, body = {p.x, p.y, b.x, b.y})
-            str := fmt.aprintf("%d", index, allocator = s.frame_arena.block_allocator)
-            /* cstr := strings.clone_to_cstring(str,
-               allocator=s.frame_arena.block_allocator)*/
-            // w := raylib.MeasureTextEx(raylib.GetFontDefault(),cstr, 20, 1)
-            draw_text_center(
-                s,
-                str,
-                pos = {p.x + game.TILES_SIZE / 2, p.y + game.TILES_SIZE / 2},
-                size = 20,
-            )
-            /*raylib.DrawText(cstr,
-              i32(p.x + game.TILES_SIZE/2 - w.x/2),
-              i32(p.y + game.TILES_SIZE/2 - w.y/2),
-              20, raylib.WHITE);*/
-        }
+get_ts_src_for_wall :: proc(t:game.Tile, n: game.WallNeighbours) -> string {
+    if .South in n { return "s" }
+    switch n {
+    case {.West,.East}:fallthrough
+    case {.North,.West,.East}:
+        return "a3"
+    case {.East}:fallthrough
+    case {.North,.East}:
+        return "l"
+    case {.West}:fallthrough
+    case {.North,.West}:
+        return "r"
+    case {.North}: fallthrough
+    case {}: return "t"
+    case: fmt.println(n); panic("handle case for walls");
     }
-    b : raylib.Vector2
-    for d in c.drawables {
-        switch w in d {
-        case game.WallDrawable:
-            b = apply_camera(s.camera, game.rect_pos(w.rect));
-            draw_sprite_src_rect(s, tiles, src = w.src_rect,
-                body = {b.x, b.y, w.width, w.height})
-        case game.RockDrawable: 
-            panic("Impl");
-        }
-    }
+    fmt.println(n);
+    panic("What");
 }
+
 main :: proc() {
     raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
     raylib.SetTargetFPS(60)
-    tiles = raylib.LoadTexture("imgs/ts4.png")
+    tiles = raylib.LoadTexture("imgs/ts8.png")
     s := State{}
     s.toggle_views = true
     s.assets = game.load_assets("imgs.json", load = false)
@@ -468,6 +448,8 @@ main :: proc() {
     target := raylib.LoadRenderTexture(i32(SCREEN_WIDTH) * 4, i32(SCREEN_HEIGHT) * 4) // copy
                                                                                       // main loop
     fmt.println(ODIN_VERSION)
+    // for sorted
+    sorted := make([dynamic]SortedDrawElement)
     for !raylib.WindowShouldClose() && s.connected {
         dt := raylib.GetFrameTime()
         // copy entities
@@ -545,96 +527,7 @@ main :: proc() {
         s.camera.width = SCALED_SCREEN_WIDTH()
         s.camera.height = SCALED_SCREEN_HEIGHT()
 
-        // game loop
-        // draw map to scaled
-
-        // get entity chunk and it's quadrant
-        {
-            x := pref.body.x / f32(game.CHUNK_SIDE_SIZE)
-            y := pref.body.y / f32(game.CHUNK_SIDE_SIZE)
-            x_i := int(x)
-            y_i := int(y)
-
-            if false {
-                // fractional part within the chunk (0..1 range)
-                frac_x := abs(x) - f32(abs(x_i))
-                frac_y := abs(y) - f32(abs(y_i))
-
-                // which neighbouring chunk column/row to pull in
-                x_neighbour: int
-                if abs(x) - f32(abs(x_i)) >= 0.5 {
-                    x_neighbour = x_i + (x >= 0 ? 1 : -1) // right
-                } else {
-                    x_neighbour = x_i + (x >= 0 ? 1 : -1) // right  // left
-                }
-
-                y_neighbour: int
-                if abs(y) - f32(abs(y_i)) >= 0.5 {
-                    y_neighbour = y_i + (1 if y >= 0 else -1) // down
-                } else {
-                    y_neighbour = y_i + (-1 if y >= 0 else 1) // up
-                }
-
-                chunk_ids := [4]game.v2i {
-                    {x_i, y_i},
-                    {x_neighbour, y_i},
-                    {x_i, y_neighbour},
-                    {x_neighbour, y_neighbour},
-                }
-
-                for cid in chunk_ids {
-                    c := game.map_get_chunk(&s.gmap, cid)
-                    draw_chunk(&s, cid, c)
-                }
-            } else {
-                if x > 0 {
-                    for x in -1 ..= 1 {
-                        if y > 0 {
-                            for y in -1 ..= 1 {
-                                cid := game.v2i{x_i + x, y_i + y}
-                                c := game.map_get_chunk(&s.gmap, cid)
-                                draw_chunk(&s, cid, c)
-                            }
-                        } else {
-                            for y in -2 ..= 0 {
-                                cid := game.v2i{x_i + x, y_i + y}
-                                c := game.map_get_chunk(&s.gmap, cid)
-                                draw_chunk(&s, cid, c)
-                            }
-                        }
-                    }
-                } else {
-                    for x in -2 ..= 0 {
-                        if y > 0 {
-                            for y in -1 ..= 1 {
-                                cid := game.v2i{x_i + x, y_i + y}
-                                c := game.map_get_chunk(&s.gmap, cid)
-                                draw_chunk(&s, cid, c)
-                            }
-                        } else {
-                            for y in -2 ..= 0 {
-                                cid := game.v2i{x_i + x, y_i + y}
-                                c := game.map_get_chunk(&s.gmap, cid)
-                                draw_chunk(&s, cid, c)
-                            }
-                        }
-                    }
-                }
-                append(
-                    &s.logs,
-                    fmt.aprintf(
-                        "map index: %d %d",
-                        x_i,
-                        y_i,
-                        allocator = s.frame_arena.block_allocator,
-                    ),
-                )
-            }
-        }
-        for k, e in s.current_entities {
-            c := e
-            draw_entity(&s, s.camera, &c)
-        }
+        draw_game(&s, pref, &sorted)
         // draw game first
         if s.toggle_views {     // normal view with flush 2
             raylib.BeginTextureMode(target)

@@ -1,6 +1,7 @@
 package main
 
 import "core:strings"
+import "core:math"
 import raylib "vendor:raylib"
 import "project:common/game"
 
@@ -58,15 +59,15 @@ draw_sprite :: proc {
 
 draw_sprite_v :: proc(s: ^State, texture: raylib.Texture2D,
     pos, size: raylib.Vector2, tint := raylib.WHITE) {
-    append(&s.draws, DrawSpriteCommand{texture=texture, pos=pos, size=size, tint=tint})
+    append(&s.draws, DrawSpriteCommand{texture=texture, pos=snap(pos), size=size, tint=tint})
 }
 
 draw_sprite_rect :: proc(s: ^State, texture: raylib.Texture2D,
     body: raylib.Rectangle, tint := raylib.WHITE) {
     append(&s.draws, DrawSpriteCommand{
         texture = texture,
-        pos     = game.rect_pos(body),
-        size    = game.rect_size(body),
+        pos     = snap(game.rect_pos(body)),
+        size    = snap(game.rect_size(body)),
         tint    = tint,
     })
 }
@@ -105,8 +106,85 @@ flush_draws_2 :: proc(s: ^State) {
         draw_command_2(s, cmd, vis) }
     clear(&s.draws)
 }
+snap_f32 :: proc(v: f32) -> f32 { return v}//math.round(v) }
+snap_v2 :: proc(v: raylib.Vector2) -> raylib.Vector2 { return {snap(v.x), snap(v.y)} }
+snap :: proc {
+    snap_f32,
+    snap_v2,
+}
 // skips what's outside + move to top left
 draw_command_2 :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
+    x :f32= SCREEN_WIDTH*0.5*(1-1/SCREEN_FACTOR)
+    y :f32= SCREEN_HEIGHT*0.5*(1-1/SCREEN_FACTOR)
+    switch c in cmd {
+    case DrawTextCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        measured := text_measure(c.text, c.size * factor, c.font, c.spacing)
+        b := raylib.Rectangle{c.pos.x * factor, c.pos.y * factor, measured.x, measured.y}
+        if c.no_scale { // don't move, scale is 1
+            draw_command_text(s, c)
+        } else {
+            if rect_overlaps(b, vis) { // if it's visible then move
+                copy : DrawTextCommand = c
+                copy.pos -= snap(raylib.Vector2{x,y})
+                // sub x/y from it
+                draw_command_text(s, copy)
+            }
+        }
+
+    case DrawSpriteCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        b := raylib.Rectangle{c.pos.x * factor, c.pos.y * factor,
+                               c.size.x * factor, c.size.y * factor}
+        if c.no_scale {
+            draw_command_sprite(s, c)
+        } else {
+            if rect_overlaps(b, vis) {
+                copy : DrawSpriteCommand = c
+                copy.pos -= {x,y}
+                // sub x/y from it
+                draw_command_sprite(s, copy)
+            }
+        }
+
+    case DrawSpriteSrcCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        b := raylib.Rectangle{
+            c.body.x * factor, c.body.y * factor,
+            c.body.width * factor, c.body.height * factor,
+        }
+        if c.no_scale {
+            draw_command_sprite_src(s, c)
+        } else {
+            if rect_overlaps(b, vis) {
+                copy : DrawSpriteSrcCommand = c
+                copy.body.x -= snap(x)
+                copy.body.y -= snap(y)
+                // sub x/y from it
+                draw_command_sprite_src(s, copy)
+            }
+        }
+
+    case DrawRectCommand:
+        factor := SCREEN_FACTOR if !c.no_scale else 1.0
+        b := raylib.Rectangle{
+            c.body.x * factor, c.body.y * factor,
+            c.body.width * factor, c.body.height * factor,
+        }
+        if c.no_scale {
+            draw_command_rect(s, c)
+        } else {
+            if rect_overlaps(b, vis) {
+                copy : DrawRectCommand = c
+                copy.body.x -= x
+                copy.body.y -= y
+                // sub x/y from it
+                draw_command_rect(s, copy)
+            }
+        }
+    }
+}
+draw_command_2_old :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
     x :f32= SCREEN_WIDTH*0.5*(1-1/SCREEN_FACTOR)
     y :f32= SCREEN_HEIGHT*0.5*(1-1/SCREEN_FACTOR)
     switch c in cmd {
@@ -201,8 +279,8 @@ draw_command_text :: proc(s: ^State, cmd: DrawTextCommand) {
 @(private="file")
 draw_command_sprite :: proc(s: ^State, cmd: DrawSpriteCommand) {
     factor := SCREEN_FACTOR if !cmd.no_scale else 1.0
-    pos    := cmd.pos  * factor
-    size   := cmd.size * factor
+    pos    := snap(cmd.pos  * factor)
+    size   := snap(cmd.size * factor)
     src    := raylib.Rectangle{0, 0, f32(cmd.texture.width), f32(cmd.texture.height)}
     dst    := raylib.Rectangle{pos.x, pos.y, size.x, size.y}
     raylib.DrawTexturePro(cmd.texture, src, dst, {0, 0}, 0, cmd.tint)
@@ -212,10 +290,10 @@ draw_command_sprite :: proc(s: ^State, cmd: DrawSpriteCommand) {
 draw_command_sprite_src :: proc(s: ^State, cmd: DrawSpriteSrcCommand) {
     factor := SCREEN_FACTOR if !cmd.no_scale else 1.0
     dst    := raylib.Rectangle{
-        cmd.body.x      * factor,
-        cmd.body.y      * factor,
-        cmd.body.width  * factor,
-        cmd.body.height * factor,
+        snap(cmd.body.x      * factor),
+        snap(cmd.body.y      * factor),
+        snap(cmd.body.width  * factor),
+        snap(cmd.body.height * factor),
     }
     raylib.DrawTexturePro(cmd.texture, cmd.src, dst, {0, 0}, 0, cmd.tint)
 }

@@ -1,6 +1,5 @@
 package game
 import "core:fmt"
-import "core:math/rand"
 import "vendor:raylib"
 MapItem :: struct {
 }
@@ -15,8 +14,20 @@ Map :: struct {
 WallNeighbour :: enum u8 { North, South, East, West }
 WallNeighbours :: bit_set[WallNeighbour; u8]
 
+Biom :: enum {
+    Water,
+    Land,
+    Mountain,
+}
+get_biom :: proc(elevation, moisture, temperature: f32) -> Biom {
+    if elevation < 0.2 { return .Water }
+    if elevation > 0.7 { return .Mountain }
+    return .Land
+}
 Tile :: struct {
-    n: u16,
+    wall_neighbours: WallNeighbours,
+    biom: Biom,
+    elevation, moisture, temp: f32,
     using rect: raylib.Rectangle,
     // wall_neighbours: WallNeighbours, // only meaningful if this tile is a wall
     src_rect: raylib.Rectangle,
@@ -27,6 +38,7 @@ Drawable :: union {
 }
 WallDrawable :: struct {
     ts: int,
+    wall_neighbours: WallNeighbours,
     using rect: raylib.Rectangle,
     src_rect: raylib.Rectangle,
 }
@@ -39,9 +51,10 @@ Collidable :: struct {
 }
 CHUNK_SIZE :: 32
 TILES_SIZE :: 32
-CHUNK_GEN_POS_FACTOR :: 12
+CHUNK_GEN_POS_FACTOR :: 1
 CHUNK_SIDE_SIZE :: CHUNK_SIZE*TILES_SIZE
 Chunk :: struct {
+    cid: v2i,
     tiles: [CHUNK_SIZE][CHUNK_SIZE]Tile,
     collidables: [dynamic]Collidable,
     drawables: [dynamic]Drawable,
@@ -50,31 +63,34 @@ generate_chunck :: proc(m: ^Map, x, y: int) -> Chunk {
     tile_x := x * CHUNK_SIZE
     tile_y := y * CHUNK_SIZE
     chunk := Chunk{}
+    chunk.cid = {x,y}
     chunk.collidables = make([dynamic]Collidable)
     for j in 0..<CHUNK_SIZE { // row/y
         for i in 0..<CHUNK_SIZE { // col/x
             t := Tile{}
-            c := tile_index_at(m, tile_x+i, tile_y+j);
-            t.n = c
-            if c >= 7 {
-                wall_neighbours := wall_neighbours_for(m,tile_x + i, tile_y + j)
+            t.elevation = tile_elevation(m, tile_x+i, tile_y+j);
+            t.temp = tile_temp(m, tile_x+i, tile_y+j);
+            t.moisture = tile_moisture(m, tile_x+i, tile_y+j);
+            if tile_is_wall(t.elevation) {
+                t.wall_neighbours = wall_neighbours_for(m,tile_x + i, tile_y + j)
+                x :=f32((tile_x + i)*TILES_SIZE)
+                y :=f32((tile_y + j)*TILES_SIZE )
                 append(&chunk.collidables, Collidable{
-                    x=f32((tile_x + i)*TILES_SIZE),
-                    y=f32((tile_y + j)*TILES_SIZE),
+                    x=x, y=y,
                     width=TILES_SIZE,
                     height=TILES_SIZE,
                 })
                 append(&chunk.drawables, WallDrawable{
-                    x=f32((tile_x + i)*TILES_SIZE),
-                    y=f32((tile_y + j)*TILES_SIZE),
+                    x=x, y=y,
                     width=TILES_SIZE,
                     height=TILES_SIZE,
-                    src_rect = get_ts_src_for_wall(wall_neighbours)
+                    wall_neighbours=t.wall_neighbours,
+                    src_rect = get_ts_src_for_wall({x=x,y=y},t.wall_neighbours)
                 })
             }
+            t.biom = get_biom(t.elevation, t.moisture, t.temp);
             t.src_rect = get_ts_src_for_tile(t)
             chunk.tiles[j][i] = t;
-            // fmt.println(f, c, c>=7);
         }
     }
     m.chunks[v2i{x,y}] = chunk;
@@ -92,16 +108,71 @@ trbl_1 := raylib.Rectangle{0*16, 2*16, 16, 16}
 trbl_2 := raylib.Rectangle{1*16, 2*16, 16, 16}
 trbl_3 := raylib.Rectangle{2*16, 2*16, 16, 16}
 trbl_4 := raylib.Rectangle{3*16, 2*16, 16, 16}
-random_ground_tile :: proc() -> raylib.Rectangle {
-    switch rand.int31() % 4 {
+snow_1 := raylib.Rectangle{0*16, 3*16, 16, 16}
+snow_2 := raylib.Rectangle{1*16, 3*16, 16, 16}
+snow_3 := raylib.Rectangle{2*16, 3*16, 16, 16}
+snow_4 := raylib.Rectangle{3*16, 3*16, 16, 16}
+water_1 := raylib.Rectangle{0*16, 4*16, 16, 16}
+water_2 := raylib.Rectangle{1*16, 4*16, 16, 16}
+water_3 := raylib.Rectangle{2*16, 4*16, 16, 16}
+water_4 := raylib.Rectangle{3*16, 4*16, 16, 16}
+water_11 := raylib.Rectangle{0*16, 5*16, 16, 16}
+water_12 := raylib.Rectangle{1*16, 5*16, 16, 16}
+water_13 := raylib.Rectangle{2*16, 5*16, 16, 16}
+water_14 := raylib.Rectangle{3*16, 5*16, 16, 16}
+water_21 := raylib.Rectangle{0*16, 5*16, 16, 16}
+water_22 := raylib.Rectangle{1*16, 5*16, 16, 16}
+water_23 := raylib.Rectangle{2*16, 5*16, 16, 16}
+water_24 := raylib.Rectangle{3*16, 5*16, 16, 16}
+tile_hash :: proc(x, y, seed: int) -> u32 {
+    h := u32(seed)
+    h ~= u32(x) * 0x85ebca6b
+    h ~= u32(y) * 0xc2b2ae35
+
+    h ~= h >> 16
+    h *= 0x7feb352d
+    h ~= h >> 15
+    h *= 0x846ca68b
+    h ~= h >> 16
+
+    return h
+}
+
+random_ground_tile :: proc(x,y,s:int) -> raylib.Rectangle {
+    switch tile_hash(x, y, s) % 4 {
     case 0: return grount_t_1
     case 1: return grount_t_2
     case 2: return grount_t_3
     case : return grount_t_4
     }
 }
-random_trbl_tile :: proc() -> raylib.Rectangle {
-    switch rand.int31() % 4 {
+random_snow_tile :: proc(x,y,s:int) -> raylib.Rectangle {
+    switch tile_hash(x, y, s) % 4 {
+    case 0: return  snow_1
+    case 1: return  snow_2
+    case 2: return  snow_3
+    case : return   snow_4
+    }
+}
+random_water_tile :: proc(x,y,s:int) -> raylib.Rectangle {
+    switch tile_hash(x, y, s) % 12 {
+    case 0: return      water_1
+    case 1: return      water_2
+    case 2: return      water_3
+    case 3: return      water_4
+    case 4: return      water_11
+    case 5: return      water_12
+    case 6: return      water_13
+    case 7: return      water_14
+    case 8: return      water_21
+    case 9: return      water_22
+    case 10: return     water_23
+    case 11: return     water_24
+    case : return       water_4
+    }
+}
+random_trbl_tile :: proc(x,y,s:int) -> raylib.Rectangle {
+    switch tile_hash(x,y,s) % 4 {
     case 0: return  trbl_1
     case 1: return  trbl_2
     case 2: return  trbl_3
@@ -109,10 +180,21 @@ random_trbl_tile :: proc() -> raylib.Rectangle {
     }
 }
 get_ts_src_for_tile ::  proc(t: Tile) -> raylib.Rectangle {
-    return random_ground_tile()
+    switch t.biom {
+    case .Mountain: {
+        return random_snow_tile(int(t.x),int(t.y),5)
+    }
+    case .Land: {
+        return random_ground_tile(int(t.x),int(t.y),8)
+    }
+    case .Water: {
+        return random_water_tile(int(t.x),int(t.y),10)
+    }
+    case: panic("What")
+    }
 }
-get_ts_src_for_wall :: proc(n: WallNeighbours) ->raylib.Rectangle {
-    if .South in n { return random_trbl_tile() }
+get_ts_src_for_wall :: proc(_t:Tile, n: WallNeighbours) ->raylib.Rectangle {
+    if .South in n { return random_trbl_tile(int(_t.x),int(_t.y),9) }
     switch n {
     case {.West,.East}:fallthrough
     case {.North,.West,.East}:
@@ -140,23 +222,41 @@ map_get_chunk :: proc(m :^Map, i: v2i) -> ^Chunk {
     }
     return c;
 }
-tile_index_at :: proc(m: ^Map, tile_x, tile_y: int) -> u16 {
-    f := seeded_fbm(
+tile_elevation :: proc(m: ^Map, tile_x, tile_y: int) -> f32 {
+    f := fbm_xyos(
         f32(tile_x) / CHUNK_GEN_POS_FACTOR,
         f32(tile_y) / CHUNK_GEN_POS_FACTOR,
         m.octaves, m.seed)
-    return u16(10 * 0.5 * (f + 1))
+    return f
 }
-tile_is_wall :: proc(index: u16) -> bool {
-    return index >= 7
+tile_moisture :: proc(m: ^Map, tile_x, tile_y: int) -> f32 {
+    f := fbm_xyos(
+        f32(tile_x) / CHUNK_GEN_POS_FACTOR/ 20,
+        f32(tile_y) / CHUNK_GEN_POS_FACTOR/ 20,
+        m.octaves, m.seed)
+    return 1-f
+}
+tile_temp :: proc(m: ^Map, tile_x, tile_y: int) -> f32 {
+    f := fbm_xyos(
+        f32(tile_x) / CHUNK_GEN_POS_FACTOR/100,
+        f32(tile_y) / CHUNK_GEN_POS_FACTOR/100,
+        1, m.seed + 474627);
+    return f;
+}
+
+fbm_xyos :: proc(x,y: f32, o, s: int) -> f32 {
+    return 0.5*(seeded_fbm(x, y, o, s)+1)
+}
+tile_is_wall :: proc(index: f32) -> bool {
+    return index >= 0.7
 }
 wall_neighbours_for :: proc(m: ^Map, tile_x, tile_y: int) -> WallNeighbours {
     neighbours := WallNeighbours{}
 
-    if tile_is_wall(tile_index_at(m, tile_x, tile_y - 1)) { neighbours += {.North} }
-    if tile_is_wall(tile_index_at(m, tile_x, tile_y + 1)) { neighbours += {.South} }
-    if tile_is_wall(tile_index_at(m, tile_x - 1, tile_y)) { neighbours += {.West}  }
-    if tile_is_wall(tile_index_at(m, tile_x + 1, tile_y)) { neighbours += {.East}  }
+    if tile_is_wall(tile_elevation(m, tile_x, tile_y - 1)) { neighbours += {.North} }
+    if tile_is_wall(tile_elevation(m, tile_x, tile_y + 1)) { neighbours += {.South} }
+    if tile_is_wall(tile_elevation(m, tile_x - 1, tile_y)) { neighbours += {.West}  }
+    if tile_is_wall(tile_elevation(m, tile_x + 1, tile_y)) { neighbours += {.East}  }
 
     return neighbours
 }

@@ -76,7 +76,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         fmt.println(t, len(g.assets.assets));
         c.entity = game.Entity{
             texture=t,
-            body= raylib.Rectangle{0,0,50,50}
+            body= raylib.Rectangle{0,0,32,32}
         };
         c.move_to = raylib.Vector2{0,0}
         c.move_origin = raylib.Vector2{0,0}
