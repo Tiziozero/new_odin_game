@@ -100,6 +100,12 @@ flush_draws :: proc(s: ^State) {
     }
     clear(&s.draws)
 }
+flush_draws_scale :: proc(s: ^State) {
+    for cmd in s.draws {
+        draw_command_scaled(s, cmd)
+    }
+    clear(&s.draws)
+}
 flush_draws_2 :: proc(s: ^State) {
     vis := visible_rect()
     for cmd in s.draws {
@@ -267,12 +273,45 @@ draw_command :: proc(s: ^State, cmd: DrawCommand) {
     case DrawRectCommand: draw_command_rect(s, c)
     }
 }
+draw_command_scaled :: proc(s: ^State, cmd: DrawCommand) {
+    switch c in cmd {
+    case DrawTextCommand:      {
+        draw_command_text(s, c)
+    }
+    case DrawSpriteCommand: {
+        draw_command_sprite(s, c)
+    }
+    case DrawSpriteSrcCommand: {
+        draw_command_sprite_src(s, c)
+    }
+    case DrawRectCommand: {
+        draw_command_rect(s, c)
+    }
+    }
+}
 
+bool_center_scale := true
+center_scaled_v :: proc(v: raylib.Vector2,factor: f32) -> raylib.Vector2 {
+    if bool_center_scale {
+    return v - {SCREEN_WIDTH,SCREEN_HEIGHT}*(factor-1)/2
+    } else { return v }
+}
+center_scaled_r :: proc(v: raylib.Rectangle,factor: f32) -> raylib.Rectangle {
+    if bool_center_scale {
+    p := game.rect_pos(v) - {SCREEN_WIDTH,SCREEN_HEIGHT}*(factor-1)/2
+     return {p.x, p.y, v.width, v.height}
+    } else { return v }
+}
+
+center_scaled :: proc {
+    center_scaled_v,
+    center_scaled_r,
+}
 @(private="file")
 draw_command_text :: proc(s: ^State, cmd: DrawTextCommand) {
     font   := cmd.font if cmd.font.texture.id != 0 else raylib.GetFontDefault()
     factor := SCREEN_FACTOR if !cmd.no_scale else 1.0
-    pos    := cmd.pos  * factor
+    pos    := center_scaled(cmd.pos  * factor,factor)
     size   := cmd.size * factor
     spacing:= cmd.spacing
     cstr   := strings.clone_to_cstring(cmd.text, allocator=s.frame_arena.block_allocator)
@@ -282,7 +321,7 @@ draw_command_text :: proc(s: ^State, cmd: DrawTextCommand) {
 @(private="file")
 draw_command_sprite :: proc(s: ^State, cmd: DrawSpriteCommand) {
     factor := SCREEN_FACTOR if !cmd.no_scale else 1.0
-    pos    := cmd.pos  * factor
+    pos    := center_scaled(cmd.pos  * factor,factor)
     size   := cmd.size * factor
     src    := raylib.Rectangle{0, 0, f32(cmd.texture.width), f32(cmd.texture.height)}
     dst    := raylib.Rectangle{pos.x, pos.y, size.x, size.y}
@@ -302,6 +341,7 @@ draw_command_sprite_src :: proc(s: ^State, cmd: DrawSpriteSrcCommand) {
         cmd.body.width  * factor,
         cmd.body.height * factor,
     }
+    dst = center_scaled(dst,factor)
     /*if dst.x > s.camera.x + s.camera.width { return }
     if dst.x + dst.width < s.camera.x { return }
     if dst.y > s.camera.y + s.camera.height { return }
@@ -416,6 +456,7 @@ draw_command_rect :: proc(s: ^State, cmd: DrawRectCommand) {
         cmd.body.width  * factor,
         cmd.body.height * factor,
     }
+    body = center_scaled(body,factor)
     /*dst := unapply_camera(s, body)
     if dst.x > s.camera.x + s.camera.width { return }
     if dst.x + dst.width < s.camera.x { return }

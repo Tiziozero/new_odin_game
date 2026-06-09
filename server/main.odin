@@ -21,13 +21,20 @@ when ODIN_VERSION < MIN_ODIN {
 @private
 Client :: struct {
     entity: game.Entity,
+    last_entity: game.Entity,
     endpoint: net.Endpoint,
     last_ping: time.Time,
     move_to: raylib.Vector2,
     move_origin:raylib.Vector2,
+    abilities: [6]game.EntityAbility,
+}
+Ability :: struct {
+    kind: game.AbilityKind,
+    action: proc(level: int)
 }
 @private
 Game :: struct {
+    abilities: map[int]Ability,
     entities: map[game.EntityHandle]Client,
     entities_lock: sync.Mutex,
     socket: net.UDP_Socket,
@@ -72,6 +79,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         fmt.println(t, len(g.assets.assets));
         c.entity = game.Entity{
             texture=t,
+            health=100,
             body= raylib.Rectangle{0,0,32,32}
         };
         c.move_to = raylib.Vector2{0,0}
@@ -124,22 +132,24 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         net.send_udp(g.socket, b.data[:b.len], endpoint);
         buffer_io.buffer_destroy(&b);
     } else if msg == networking.MSG_USER_DATA {
-        id, ok := buffer_io.buffer_read_u32(buf);
+        panic("no");
+        /*id, ok := buffer_io.buffer_read_u32(buf);
         if !ok {
             panic("Failed to read u32, user id for connect");
         }
         delta := game.EntityDelta{};
-       game.unpack_entity(buf, &delta);
+        game.unpack_entity(buf, &delta);
         sync.mutex_lock(&g.entities_lock);
         last, lok := g.entities[game.EntityHandle(id)];
         if !lok {
             fmt.println(id)
             panic("entity doesn't exist");
         }
+        //game.implement_entity_delta(&last.entity, )
         last.entity.body = delta.body;
         last.last_ping = time.now();
         g.entities[game.EntityHandle(id)] = last;
-        sync.mutex_unlock(&g.entities_lock);
+        sync.mutex_unlock(&g.entities_lock);*/
     } else if msg == networking.MSG_USER_MSG {
         id, ok := buffer_io.buffer_read_u32(buf);
         assert(ok);
@@ -173,10 +183,10 @@ game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer) -> int {
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     sync.mutex_lock(&g.entities_lock);
     for k, e in g.entities {
-        delta := game.EntityDelta{};
-        delta.body = e.entity.body;
-        delta.status = e.entity.status;
-        delta.texture = e.entity.texture;
+        delta := game.get_entity_delta(e.last_entity, e.entity);
+        if delta.delta > 0 {
+            fmt.println("Delta:", delta);
+        }
         buffer_io.buffer_write_u32(buf, u32(k));
         game.pack_entity(buf, &delta);
     }
@@ -202,13 +212,13 @@ pack_game_loop_data :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     for k, e in g.entities {
         buffer_io.buffer_write_u32(buf, u32(k));
-        delta := game.EntityDelta{status=e.entity.status,
-            body=e.entity.body,texture=e.entity.texture};
+        delta := game.get_entity_delta(e.last_entity, e.entity);
         game.pack_entity(buf, &delta);
     }
 }
 
 update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
+    last_current_entity := c.entity;
     current_pos := game.rect_pos(c.entity.body)
     d := raylib.Vector2Normalize(c.move_to - current_pos)
     next_pos := current_pos + d * game.ENTITY_SPEED * dt
@@ -250,17 +260,22 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
     if i == 3 {
         panic("Had to check 3 times for collisions");
     }
+    c.last_entity = last_current_entity
 }
 MAX_TIMEOUT :: 10
+pack_user_specific_data :: proc(buf: []byte) {
+}
+snapshot_entry :: struct {
+    endpoint:net.Endpoint,
+    k: game.EntityHandle,
+    last_ping:time.Time,
+}
+// user message:
+// [user specific data][game data]
 handle_sender_loop :: proc(g: ^Game, n: int) {
     duration := time.Duration(n) * time.Millisecond
     buf := buffer_io.buffer_make(1024);
     to_remove := make([dynamic]game.EntityHandle);
-    snapshot_entry :: struct {
-        endpoint:net.Endpoint,
-        k: game.EntityHandle,
-        last_ping:time.Time,
-    }
     endpoints := make([dynamic]snapshot_entry);
     dt : f32 = 0;
     for {

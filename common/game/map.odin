@@ -127,9 +127,10 @@ chunk_rand :: proc(cid: v2i, salt: int) -> int {
 }
 new_random_map_item :: proc(m: ^Map, c: ^Chunk, x, y: int) {
     item := RockDrawable{}
-    item.src_rect = rock
-    item.x = f32(c.cid.x+x) * TILES_SIZE
-    item.y = f32(c.cid.y+y) * TILES_SIZE
+    item.src_rect = rock if int(10*fbm_xyos(f32(x),f32(y),m.octaves, m.seed*x*y)) % 2 == 0 else rock_2;
+    item.x = f32(c.cid.x*CHUNK_SIZE+x) * TILES_SIZE
+    item.y = f32(c.cid.y*CHUNK_SIZE+y) * TILES_SIZE
+    fmt.println(item.rect, c.cid)
     item.width = TILES_SIZE
     item.height = TILES_SIZE
     append(&c.drawables, item);
@@ -138,14 +139,15 @@ new_random_map_item :: proc(m: ^Map, c: ^Chunk, x, y: int) {
 }
 gen_chunk_items :: proc(m: ^Map, c: ^Chunk) {
     for i in 0..<int(20*fbm_xyos(f32(c.cid.x), f32(c.cid.y),m.octaves, m.seed)) {
-        x := chunk_rand(c.cid, 67)%CHUNK_SIZE;
-        y := chunk_rand(c.cid, 69)%CHUNK_SIZE;
-           i := 0
-        for c.tiles[y][x].occupied && i < 20 {
+        x := chunk_rand(c.cid, 67*i)%CHUNK_SIZE;
+        y := chunk_rand(c.cid, 69*i)%CHUNK_SIZE;
+           k := 0
+        for c.tiles[y][x].occupied && k < 20 {
             x = chunk_rand(c.cid, 67)%CHUNK_SIZE;
             y = chunk_rand(c.cid, 69)%CHUNK_SIZE;
-            i+=1
+            k+=1
         }
+        fmt.println(c.cid,x, y)
         new_random_map_item(m, c, x, y);
         
     }
@@ -179,6 +181,7 @@ water_22 := raylib.Rectangle{1*16, 5*16, 16, 16}
 water_23 := raylib.Rectangle{2*16, 5*16, 16, 16}
 water_24 := raylib.Rectangle{3*16, 5*16, 16, 16}
 rock := raylib.Rectangle{0, 112, 16,16}
+rock_2 := raylib.Rectangle{16, 112, 16,16}
 tile_hash :: proc(x, y, seed: int) -> u32 {
     h := u32(seed)
     h ~= u32(x) * 0x85ebca6b

@@ -162,25 +162,17 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     draw_rect(s, p, game.rect_size(e.body), raylib.RED)
     width := f32(s.assets.assets[e.texture].texture.width)
     height := f32(s.assets.assets[e.texture].texture.height)
-    // src:=raylib.Rectangle{ x=0,y=0, width=width, height=height }
     src := raylib.Rectangle {
         x      = 1.2 * (width / 4),
         y      = height / 4,
         width  = width / 2,
         height = height / 2,
     }
+    src=raylib.Rectangle{ x=0,y=0, width=width, height=height }
     dest := raylib.Rectangle{p.x, p.y, e.body.width, e.body.height}
-    // raylib.DrawTexturePro(s.assets.assets[e.texture].texture, src, dest, raylib.Vector2{0,0}, 0, raylib.WHITE);
     draw_sprite_rect(s, texture = s.assets.assets[e.texture].texture, body = dest)
     // draw id
-    str := fmt.aprintf("%d", e.id, allocator = s.frame_arena.block_allocator)
-    // cstr := strings.clone_to_cstring(str, allocator=s.frame_arena.block_allocator)
-    // w := raylib.MeasureText(cstr, 20)
-
-    /* tpos := apply_camera(camera,
-       game.rect_pos(e.body) + game.rect_size(e.body)*0.5 -
-       (e.body.height/2+20)*raylib.Vector2{0,1} -
-       raylib.Vector2{f32(w)/2, 0});*/
+    str := fmt.aprintf("%d:%.1f", e.id, e.health, allocator = s.frame_arena.block_allocator)
 
     tpos := apply_camera(
         camera,
@@ -199,9 +191,9 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
     case .IE_SCROLL:
         {
-            SCREEN_FACTOR += e.scroll_delta / MOUSE_DELTA
-            if SCREEN_FACTOR < 1 {SCREEN_FACTOR = 1}
-            if SCREEN_FACTOR > MAX_ZOOM_FACTOR {SCREEN_FACTOR = MAX_ZOOM_FACTOR}
+            // SCREEN_FACTOR += e.scroll_delta / MOUSE_DELTA
+            // if SCREEN_FACTOR < 1 {SCREEN_FACTOR = 1}
+            // if SCREEN_FACTOR > MAX_ZOOM_FACTOR {SCREEN_FACTOR = MAX_ZOOM_FACTOR}
         }
     case .IE_KEY_PRESSED:
         {
@@ -313,10 +305,8 @@ init_game_con :: proc(s: ^State) -> i32 {
             }
             delta := game.EntityDelta{}
             game.unpack_entity(&recv_buf_b, &delta)
-            e := game.Entity{}
-            e.body = delta.body
-            e.status = delta.status
-            e.texture = delta.texture
+            e := s.state_entities[id];
+            game.implement_entity_delta(&e, &delta);
             s.state_entities[id] = e
             e.id = id
         }
@@ -362,10 +352,8 @@ receiver_thread :: proc(s: ^State) {
                 if !last_ok {
                     last = game.Entity{}
                 }
-                last.id = id
-                last.body = delta.body
-                last.status = delta.status
-                last.texture = delta.texture
+                last.id = id;
+                game.implement_entity_delta(&last, &delta);
                 s.state_entities[id] = last
             }
             sync.mutex_unlock(&s.entities_lock)
@@ -576,26 +564,29 @@ main :: proc() {
 
         draw_game(&s, pref, &sorted)
         // draw game first
-        if s.toggle_views {     // normal view with flush 2
-            raylib.BeginTextureMode(target)
-            raylib.ClearBackground(raylib.PURPLE)
-            flush_draws_2(&s)
-            raylib.EndTextureMode()
-            raylib.BeginDrawing()
-            // uses top left quarter and draws that (actually bottom left? inversion and what not)
-            src := raylib.Rectangle{0, 3 * SCREEN_HEIGHT, SCREEN_WIDTH, -SCREEN_HEIGHT} // flipped Y
-            dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
-            raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
-        } else {     // draw 1 whole screen
-            raylib.BeginTextureMode(target)
-            raylib.ClearBackground(raylib.PURPLE)
-            flush_draws(&s)
-            raylib.EndTextureMode()
-            raylib.BeginDrawing()
-            src := raylib.Rectangle{0, 0, SCREEN_WIDTH * 4, -SCREEN_HEIGHT * 4} // flipped Y
-            dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
-            raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
+        if false {
+            if s.toggle_views {     // normal view with flush 2
+                raylib.BeginTextureMode(target)
+                raylib.ClearBackground(raylib.PURPLE)
+                flush_draws(&s)
+                raylib.EndTextureMode()
+                raylib.BeginDrawing()
+                // uses top left quarter and draws that (actually bottom left? inversion and what not)
+                src := raylib.Rectangle{0, 3 * SCREEN_HEIGHT, SCREEN_WIDTH, -SCREEN_HEIGHT} // flipped Y
+                dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
+                raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
+            } else {     // draw 1 whole screen
+                raylib.BeginTextureMode(target)
+                raylib.ClearBackground(raylib.PURPLE)
+                flush_draws(&s)
+                raylib.EndTextureMode()
+                raylib.BeginDrawing()
+                src := raylib.Rectangle{0, 0, SCREEN_WIDTH * 4, -SCREEN_HEIGHT * 4} // flipped Y
+                dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
+                raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
+            }
         }
+        flush_draws_scale(&s)
         // draw UI
         {// i here conflicts with ping i
             i: i32 = 0

@@ -12,14 +12,93 @@ import "project:common/buffer_io"
 USR_MSG_MOVE:: 1;
 
 SCREEN_SIZE :: raylib.Vector2{1200,900}
+EntityDeltaData :: u16 // each field, like position, status, texture and what not
+EDD_POS ::      0b0001
+EDD_STATUS ::   0b0010
+EDD_TEXTURE ::  0b0100
+EDD_HEALTH ::   0b1000
+FULL_SYNC :: EDD_TEXTURE + EDD_STATUS + EDD_POS + EDD_HEALTH // lazy
 
 EntityDelta :: struct {
+    delta: EntityDeltaData,
     body: raylib.Rectangle,
+    health: f32,
     status: EntityStatus,
     texture: u32,
 }
 
+// implement this
+get_entity_delta :: proc(prev, cur: Entity) -> EntityDelta {
+    d := EntityDelta{}
+    if prev.body != cur.body {
+        d.delta |= EDD_POS
+        d.body   = cur.body
+    }
+    if prev.status != cur.status {
+        d.delta  |= EDD_STATUS
+        d.status  = cur.status
+    }
+    if prev.texture != cur.texture {
+        d.delta  |= EDD_TEXTURE
+        d.texture = cur.texture
+    }
+    if prev.health != cur.health {
+        d.delta  |= EDD_HEALTH
+        d.health = cur.health
+    }
+    return d
+}
+
+implement_entity_delta :: proc(entity: ^Entity, delta: ^EntityDelta) {
+    if delta.delta & EDD_POS    != 0 { entity.body      = delta.body    }
+    if delta.delta & EDD_STATUS != 0 { entity.status    = delta.status  }
+    if delta.delta & EDD_TEXTURE!= 0 { entity.texture   = delta.texture }
+    if delta.delta & EDD_HEALTH != 0 { entity.health    = delta.health }
+}
+
 pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
+    buffer_io.buffer_write_u16(buf, e.delta)
+    if e.delta & EDD_POS != 0 {
+        buffer_io.buffer_write_f32(buf, e.body.x)
+        buffer_io.buffer_write_f32(buf, e.body.y)
+        buffer_io.buffer_write_f32(buf, e.body.width)
+        buffer_io.buffer_write_f32(buf, e.body.height)
+    }
+    if e.delta & EDD_STATUS != 0 {
+        buffer_io.buffer_write_u32(buf, transmute(u32)e.status)
+    }
+    if e.delta & EDD_TEXTURE != 0 {
+        buffer_io.buffer_write_u32(buf, e.texture)
+    }
+    if e.delta & EDD_HEALTH != 0 {
+        buffer_io.buffer_write_f32(buf, e.health)
+    }
+}
+
+unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
+    delta, ok := buffer_io.buffer_read_u16(buf)
+    assert(ok)
+    e.delta = delta
+    if delta & EDD_POS != 0 {
+        e.body.x,     ok = buffer_io.buffer_read_f32(buf); assert(ok)
+        e.body.y,     ok = buffer_io.buffer_read_f32(buf); assert(ok)
+        e.body.width, ok = buffer_io.buffer_read_f32(buf); assert(ok)
+        e.body.height,ok = buffer_io.buffer_read_f32(buf); assert(ok)
+    }
+    if delta & EDD_STATUS != 0 {
+        s, sok := buffer_io.buffer_read_u32(buf); assert(sok)
+        e.status = transmute(EntityStatus)s
+    }
+    if delta & EDD_TEXTURE != 0 {
+        e.texture, ok = buffer_io.buffer_read_u32(buf); assert(ok)
+    }
+    if delta & EDD_HEALTH != 0 {
+        e.health, ok = buffer_io.buffer_read_f32(buf); assert(ok)
+    }
+}
+
+// pack and unpack whats needed
+old_pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     buffer_io.buffer_write_u32(buf, transmute(u32)e.status);
     buffer_io.buffer_write_f32(buf, e.body.x);
     buffer_io.buffer_write_f32(buf, e.body.y);
@@ -27,7 +106,7 @@ pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     buffer_io.buffer_write_f32(buf, e.body.height);
     buffer_io.buffer_write_u32(buf, transmute(u32)e.texture);
 }
-unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
+old_unpack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
     new_status, ok := buffer_io.buffer_read_u32(buf);
     if !ok {
         fmt.panicf("Failed to read u32\n");
@@ -70,8 +149,8 @@ EntityStatus :: enum u32 {
 };
 EntityHandle :: u32;
 Entity :: struct {
+    health: f32,
     status: EntityStatus,
-    handle: EntityHandle,
     texture: u32, // texture key for game.textures
     body: raylib.Rectangle,
     id: EntityHandle,
@@ -183,4 +262,14 @@ check_entity_map_collisions :: proc (m: ^Map, entity: Entity) -> (raylib.Vector2
         }
     }
     return {}, false
+}
+AbilityKind :: enum {
+    Projectile,
+    Mele,
+    Spell,
+}
+EntityAbility :: struct {
+    ability_id: int, // indexes into game.abilities
+    level: int,
+    upgrade_requirements: struct{}, // some other time
 }
