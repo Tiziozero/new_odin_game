@@ -38,11 +38,7 @@ Game :: struct {
 game_init :: proc() -> Game {
     g := Game{}
     g.assets = game.load_assets("imgs.json");
-    m := game.Map{};
-    m.chunks = make(map[game.v2i]game.Chunk);
-    m.seed = 420
-    m.octaves = 16
-    g.gmap = m;
+    g.gmap = game.new_map();
     game.generate_chunck(&g.gmap, 0,0);
     g.entities = make(map[game.EntityHandle]Client);
     return g;
@@ -163,7 +159,6 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
                 last.move_to.y = new_y
                 last.move_origin.x = last.entity.body.x
                 last.move_origin.y = last.entity.body.y
-                // fmt.println(last.move_to, last.move_origin)
                 g.entities[id] = last;
                 sync.unlock(&g.entities_lock);
             }
@@ -207,14 +202,15 @@ pack_game_loop_data :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     for k, e in g.entities {
         buffer_io.buffer_write_u32(buf, u32(k));
-        delta := game.EntityDelta{status=e.entity.status, body=e.entity.body,texture=e.entity.texture};
+        delta := game.EntityDelta{status=e.entity.status,
+            body=e.entity.body,texture=e.entity.texture};
         game.pack_entity(buf, &delta);
     }
 }
 
 update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
-    d := raylib.Vector2Normalize(c.move_to - c.move_origin)
     current_pos := game.rect_pos(c.entity.body)
+    d := raylib.Vector2Normalize(c.move_to - current_pos)
     next_pos := current_pos + d * game.ENTITY_SPEED * dt
 
     reached := raylib.Vector2Distance(current_pos, c.move_to) <=
@@ -224,11 +220,35 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
 
     c.entity.body.x = target.x
     c.entity.body.y = target.y
-    if  v, ok := game.check_entity_map_collisions(&g.gmap, c.entity); ok {
-        fmt.println("Collision");
-        c.entity.body.x = v.x
-        c.entity.body.y = v.y
-        c.move_to = game.rect_pos(c.entity.body)
+    i := 0
+    // fmt.println(reached, target,c.move_to)
+    for i < 3 { // 3 iterations because collision checks one wall at a time,
+                // so if the entity's colliding against two perpendiculat walls,
+                // only one's checked at a time
+        if  v, ok := game.check_entity_map_collisions(&g.gmap, c.entity); ok {
+            // v is new pos AFTER collision.
+            // if the distance moved AFTER COLLISSION is less than a threashold,
+            // then move was irrelevant/entity's stuck or can't move further,
+            // so stop moving
+            dist := raylib.Vector2Distance(current_pos, v) < 0.25
+            fmt.println("Collision", dist);
+            if  dist {
+                fmt.println("same: ", current_pos, v)
+                c.move_to = v;
+            }
+
+            c.entity.body.x = v.x
+            c.entity.body.y = v.y
+            // c.move_to = game.rect_pos(c.entity.body)
+        } else {
+            break
+        }
+        i+=1
+    }
+    // check for 2 walls.if there's a third collision the it's likely the
+    // entity's bugged
+    if i == 3 {
+        panic("Had to check 3 times for collisions");
     }
 }
 MAX_TIMEOUT :: 10

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-odin build ./client -collection:project=. -out:client_bin
+odin build ./client -collection:project=. -out:client_bin -debug
 ./client_bin
 
 

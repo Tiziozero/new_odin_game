@@ -59,15 +59,15 @@ draw_sprite :: proc {
 
 draw_sprite_v :: proc(s: ^State, texture: raylib.Texture2D,
     pos, size: raylib.Vector2, tint := raylib.WHITE) {
-    append(&s.draws, DrawSpriteCommand{texture=texture, pos=snap(pos), size=size, tint=tint})
+    append(&s.draws, DrawSpriteCommand{texture=texture, pos=pos, size=size, tint=tint})
 }
 
 draw_sprite_rect :: proc(s: ^State, texture: raylib.Texture2D,
     body: raylib.Rectangle, tint := raylib.WHITE) {
     append(&s.draws, DrawSpriteCommand{
         texture = texture,
-        pos     = snap(game.rect_pos(body)),
-        size    = snap(game.rect_size(body)),
+        pos     = game.rect_pos(body),
+        size    = game.rect_size(body),
         tint    = tint,
     })
 }
@@ -106,11 +106,14 @@ flush_draws_2 :: proc(s: ^State) {
         draw_command_2(s, cmd, vis) }
     clear(&s.draws)
 }
-snap_f32 :: proc(v: f32) -> f32 { return v}//math.round(v) }
+bool_snap := false
+snap_f32 :: proc(v: f32) -> f32 { if bool_snap { return math.round(v) } else {return v}}//math.round(v) }
 snap_v2 :: proc(v: raylib.Vector2) -> raylib.Vector2 { return {snap(v.x), snap(v.y)} }
+snap_rect :: proc(v: raylib.Rectangle) -> raylib.Rectangle { return {snap(v.x), snap(v.y), snap(v.width), snap(v.height)} }
 snap :: proc {
     snap_f32,
     snap_v2,
+    snap_rect,
 }
 // skips what's outside + move to top left
 draw_command_2 :: proc(s: ^State, cmd: DrawCommand, vis: raylib.Rectangle) {
@@ -273,29 +276,37 @@ draw_command_text :: proc(s: ^State, cmd: DrawTextCommand) {
     size   := cmd.size * factor
     spacing:= cmd.spacing
     cstr   := strings.clone_to_cstring(cmd.text, allocator=s.frame_arena.block_allocator)
-    raylib.DrawTextEx(font, cstr, pos, size, spacing, cmd.tint)
+    raylib.DrawTextEx(font, cstr, snap(pos), snap(size), spacing, cmd.tint)
 }
 
 @(private="file")
 draw_command_sprite :: proc(s: ^State, cmd: DrawSpriteCommand) {
     factor := SCREEN_FACTOR if !cmd.no_scale else 1.0
-    pos    := snap(cmd.pos  * factor)
-    size   := snap(cmd.size * factor)
+    pos    := cmd.pos  * factor
+    size   := cmd.size * factor
     src    := raylib.Rectangle{0, 0, f32(cmd.texture.width), f32(cmd.texture.height)}
     dst    := raylib.Rectangle{pos.x, pos.y, size.x, size.y}
-    raylib.DrawTexturePro(cmd.texture, src, dst, {0, 0}, 0, cmd.tint)
+    /*if dst.x > s.camera.x + s.camera.width { return }
+    if dst.x + dst.width < s.camera.x { return }
+    if dst.y > s.camera.y + s.camera.height { return }
+    if dst.y + dst.height < s.camera.y { return }*/
+    raylib.DrawTexturePro(cmd.texture, snap(src), snap(dst), {0, 0}, 0, cmd.tint)
 }
 
 @(private="file")
 draw_command_sprite_src :: proc(s: ^State, cmd: DrawSpriteSrcCommand) {
     factor := SCREEN_FACTOR if !cmd.no_scale else 1.0
     dst    := raylib.Rectangle{
-        snap(cmd.body.x      * factor),
-        snap(cmd.body.y      * factor),
-        snap(cmd.body.width  * factor),
-        snap(cmd.body.height * factor),
+        cmd.body.x      * factor,
+        cmd.body.y      * factor,
+        cmd.body.width  * factor,
+        cmd.body.height * factor,
     }
-    raylib.DrawTexturePro(cmd.texture, cmd.src, dst, {0, 0}, 0, cmd.tint)
+    /*if dst.x > s.camera.x + s.camera.width { return }
+    if dst.x + dst.width < s.camera.x { return }
+    if dst.y > s.camera.y + s.camera.height { return }
+    if dst.y + dst.height < s.camera.y { return }*/
+    raylib.DrawTexturePro(cmd.texture, snap(cmd.src), snap(dst), {0, 0}, 0, cmd.tint)
 }
 // ---- helpers ----------------------------------------------------------------
 
@@ -405,7 +416,12 @@ draw_command_rect :: proc(s: ^State, cmd: DrawRectCommand) {
         cmd.body.width  * factor,
         cmd.body.height * factor,
     }
-    raylib.DrawRectangleRec(body, cmd.tint)
+    /*dst := unapply_camera(s, body)
+    if dst.x > s.camera.x + s.camera.width { return }
+    if dst.x + dst.width < s.camera.x { return }
+    if dst.y > s.camera.y + s.camera.height { return }
+    if dst.y + dst.height < s.camera.y { return }*/
+    raylib.DrawRectangleRec(snap(body), cmd.tint)
 }
 // in draw.odin or wherever flush_draws lives
 

@@ -1,6 +1,5 @@
 package main
 
-import "core:sync/chan"
 import "vendor:raylib"
 import "core:fmt"
 import "core:slice"
@@ -24,13 +23,20 @@ draw_sde :: proc(s: ^State, a: SortedDrawElement) {
     }
 }
 draw_game :: proc(s: ^State, pref: game.Entity, buf: ^[dynamic]SortedDrawElement) {
-    draw_map_floor(s, pref)
-    draw_ordered_elements(s, pref, buf)
+    chunks := get_relevant_chuncks(s, pref)
+    draw_map_floor(s, pref, chunks[:])
+    draw_ordered_elements(s, pref, chunks[:], buf)
 }
-draw_ordered_elements :: proc(s: ^State, pref: game.Entity, buf: ^[dynamic]SortedDrawElement) {
+draw_ordered_elements :: proc(s: ^State, pref: game.Entity, chunks:[]game.v2i, buf: ^[dynamic]SortedDrawElement) {
     // draw entities
     for _, e in s.current_entities {
         append(buf, SortedDrawElement(e))
+    }
+    for id,k in chunks {
+        c := game.map_get_chunk(&s.gmap, id)
+        for t in c.drawables {
+            append(buf, SortedDrawElement(t))
+        }
     }
     slice.sort_by(buf[:], proc(a, b: SortedDrawElement) -> bool {
         ab := get_sde_rect(a);
@@ -44,25 +50,25 @@ draw_ordered_elements :: proc(s: ^State, pref: game.Entity, buf: ^[dynamic]Sorte
 }
 
 
-get_relevan_chuncks :: proc(s: ^State, pref: game.Entity) -> [dynamic]^game.Chunk { 
+get_relevant_chuncks :: proc(s: ^State, pref: game.Entity) -> [dynamic]game.v2i { 
     x := pref.body.x / f32(game.CHUNK_SIDE_SIZE)
     y := pref.body.y / f32(game.CHUNK_SIDE_SIZE)
     x_i := int(x)
     y_i := int(y)
-    chunks := make([dynamic]^game.Chunk,allocator=s.frame_arena.block_allocator);
+    chunks := make([dynamic]game.v2i,allocator=s.frame_arena.block_allocator);
     if x > 0 {
         for x in -1 ..= 1 {
             if y > 0 {
                 for y in -1 ..= 1 {
                     cid := game.v2i{x_i + x, y_i + y}
                     c := game.map_get_chunk(&s.gmap, cid)
-                    append(&chunks, c);
+                    append(&chunks, cid);
                 }
             } else {
                 for y in -2 ..= 0 {
                     cid := game.v2i{x_i + x, y_i + y}
                     c := game.map_get_chunk(&s.gmap, cid)
-                    append(&chunks, c);
+                    append(&chunks, cid);
                 }
             }
         }
@@ -72,13 +78,13 @@ get_relevan_chuncks :: proc(s: ^State, pref: game.Entity) -> [dynamic]^game.Chun
                 for y in -1 ..= 1 {
                     cid := game.v2i{x_i + x, y_i + y}
                     c := game.map_get_chunk(&s.gmap, cid)
-                    append(&chunks, c);
+                    append(&chunks, cid);
                 }
             } else {
                 for y in -2 ..= 0 {
                     cid := game.v2i{x_i + x, y_i + y}
                     c := game.map_get_chunk(&s.gmap, cid)
-                    append(&chunks, c);
+                    append(&chunks, cid);
                 }
             }
         }
@@ -86,16 +92,11 @@ get_relevan_chuncks :: proc(s: ^State, pref: game.Entity) -> [dynamic]^game.Chun
     return chunks;
 }
 
-draw_map_floor :: proc(s: ^State, pref: game.Entity) { 
-    x := pref.body.x / f32(game.CHUNK_SIDE_SIZE)
-    y := pref.body.y / f32(game.CHUNK_SIDE_SIZE)
-    x_i := int(x)
-    y_i := int(y)
-    chunks := get_relevan_chuncks(s, pref)
-    for c in chunks {
+draw_map_floor :: proc(s: ^State, pref: game.Entity, chunks: []game.v2i) { 
+    for id,k in chunks {
+        c := game.map_get_chunk(&s.gmap, id)
         draw_chunk_floor(s, c.cid, c)
     }
-    delete(chunks)
 
 }
 get_drawable_rect :: proc(d: game.Drawable) -> raylib.Rectangle {
@@ -109,14 +110,15 @@ get_drawable_rect :: proc(d: game.Drawable) -> raylib.Rectangle {
 draw_drawable :: proc(s: ^State, d: game.Drawable) {
     switch w in d {
     case game.WallDrawable:
-        fmt.println("Drawing wall");
         b := apply_camera(s.camera, game.rect_pos(w.rect));
            draw_sprite_src_rect(s, tiles, src = w.src_rect,
                body = {b.x, b.y, w.width, w.height})
-           draw_text_center(s,get_ts_src_for_wall({}, w.wall_neighbours),
-               b+0.5*game.rect_size(w.rect),tint=raylib.WHITE);
+           /* draw_text_center(s,get_ts_src_for_wall({}, w.wall_neighbours),
+               b+0.5*game.rect_size(w.rect),tint=raylib.WHITE);*/
     case game.RockDrawable:
-        panic("impl")
+        b := apply_camera(s.camera, game.rect_pos(w.rect));
+           draw_sprite_src_rect(s, tiles, src = w.src_rect,
+               body = {b.x, b.y, w.width, w.height})
     case: panic("Impl")
     }
 }

@@ -55,7 +55,6 @@ WallDrawable :: struct {
 RockDrawable :: struct {
     ts: int,
     src_rect: raylib.Rectangle,
-    using rect: raylib.Rectangle,
 }
 Collidable :: struct {
     using rect: raylib.Rectangle,
@@ -126,15 +125,8 @@ chunk_rand :: proc(cid: v2i, salt: int) -> int {
     return int(h)
 }
 new_random_map_item :: proc(m: ^Map, c: ^Chunk, x, y: int) {
-    item := RockDrawable{}
-    item.src_rect = rock
-    item.x = f32(c.cid.x+x) * TILES_SIZE
-    item.y = f32(c.cid.y+y) * TILES_SIZE
-    item.width = TILES_SIZE
-    item.height = TILES_SIZE
-    append(&c.drawables, item);
-    c_rect := Collidable{rect=item.rect}
-    append(&c.collidables, c_rect);
+    rock := RockDrawable{}
+    rock.src_rect = rock_rect
 }
 gen_chunk_items :: proc(m: ^Map, c: ^Chunk) {
     for i in 0..<int(20*fbm_xyos(f32(c.cid.x), f32(c.cid.y),m.octaves, m.seed)) {

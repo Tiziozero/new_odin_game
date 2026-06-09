@@ -8,7 +8,6 @@ when ODIN_VERSION < MIN_ODIN {
 }
 
 import "core:fmt"
-import "core:slice"
 import "core:math/rand"
 import "core:mem"
 import "core:net"
@@ -21,13 +20,46 @@ import "project:common/game"
 import "project:common/networking"
 import raylib "vendor:raylib"
 ID: u32 = 0
-apply_camera :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Vector2 {
+apply_camera_v :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Vector2 {
     return v - game.rect_pos(camera)
 }
-unapply_camera :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Vector2 {
+unapply_camera_v :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Vector2 {
     return v + game.rect_pos(camera)
 }
-
+apply_camera_r :: proc(c: raylib.Rectangle, v: raylib.Rectangle) -> raylib.Rectangle {
+    return {c.x-v.x, c.y-v.y, v.width,v.height}
+}
+unapply_camera_r :: proc(c: raylib.Rectangle, v: raylib.Rectangle) -> raylib.Rectangle {
+    return {c.x+v.x, c.y+v.y, v.width,v.height}
+}
+apply_camera_s_v :: proc(s: ^State, v: raylib.Vector2) -> raylib.Vector2 {
+    camera := s.camera
+    return v - game.rect_pos(camera)
+}
+unapply_camera_s_v :: proc(s: ^State, v: raylib.Vector2) -> raylib.Vector2 {
+    camera := s.camera
+    return v + game.rect_pos(camera)
+}
+apply_camera_s_r :: proc(s: ^State, v: raylib.Rectangle) -> raylib.Rectangle {
+    c := s.camera
+    return {c.x-v.x, c.y-v.y, v.width,v.height}
+}
+unapply_camera_s_r :: proc(s: ^State, v: raylib.Rectangle) -> raylib.Rectangle {
+    c := s.camera
+    return {c.x+v.x, c.y+v.y, v.width,v.height}
+}
+apply_camera :: proc {
+    apply_camera_v,
+    apply_camera_r,
+    apply_camera_s_v,
+    apply_camera_s_r,
+}
+unapply_camera :: proc {
+    unapply_camera_v,
+    unapply_camera_r,
+    unapply_camera_s_v,
+    unapply_camera_s_r,
+}
 
 State :: struct {
     player_handle:    int,
@@ -184,6 +216,8 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 fmt.println("s")
             case .T:
                 s.toggle_views = !s.toggle_views
+            case .K:
+                bool_snap = !bool_snap
             case:
             }
         }
@@ -413,10 +447,10 @@ get_ts_src_for_wall :: proc(t:game.Tile, n: game.WallNeighbours) -> string {
 main :: proc() {
     raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
     raylib.SetTargetFPS(60)
-    tiles = raylib.LoadTexture("imgs/ts8.png")
+    tiles = raylib.LoadTexture("imgs/ts9.png")
     s := State{}
     s.toggle_views = true
-    s.assets = game.load_assets("imgs.json", load = false)
+    s.assets = game.load_assets("imgs.json", load =false)
     if init_game_con(&s) != 0 {
         return
     }
@@ -434,17 +468,13 @@ main :: proc() {
     mem.dynamic_arena_init(&s.frame_arena)
     f := raylib.LoadFont("font.ttf")
     s.camera = raylib.Rectangle {
-        width  = SCALED_SCREEN_WIDTH() / 2,
-        height = SCALED_SCREEN_HEIGHT() / 2,
+        width  = SCALED_SCREEN_WIDTH(),
+        height = SCALED_SCREEN_HEIGHT(),
     }
     i := 0
     ping_id: u8 = 0
     pref: game.Entity
-    _m := game.Map{}
-    _m.chunks = make(map[game.v2i]game.Chunk)
-    _m.seed = 420
-    _m.octaves = 16
-    s.gmap = _m;
+    s.gmap = game.new_map();
     target := raylib.LoadRenderTexture(i32(SCREEN_WIDTH) * 4, i32(SCREEN_HEIGHT) * 4) // copy
                                                                                       // main loop
     fmt.println(ODIN_VERSION)
@@ -512,7 +542,15 @@ main :: proc() {
             &s.logs,
             fmt.aprintf(
                 "view :%d",
-                int(s.toggle_views) + 1,
+                int(s.toggle_views) + 0,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "snap :%d",
+                int(bool_snap) + 0,
                 allocator = s.frame_arena.block_allocator,
             ),
         )
@@ -520,6 +558,15 @@ main :: proc() {
             handle_input(&k, &s)
         }
 
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "cam size: :%.3f:%.3f",
+                s.camera.width,
+                s.camera.height,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
         // update camera
         s.camera.x = pref.body.x - SCREEN_WIDTH / 2 + pref.body.width / 2
         s.camera.y = pref.body.y - SCREEN_HEIGHT / 2 + pref.body.height / 2
