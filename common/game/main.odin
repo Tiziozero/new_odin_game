@@ -7,7 +7,7 @@ import "core:os"
 import "core:fmt"
 import "vendor:raylib" 
 import "project:common/buffer_io"
-
+ABILITIES_COUNT :: 6
 
 USR_MSG_MOVE:: 1;
 
@@ -28,21 +28,21 @@ EntityDelta :: struct {
 }
 
 // implement this
-get_entity_delta :: proc(prev, cur: Entity) -> EntityDelta {
+get_entity_delta :: proc(prev, cur: Entity, all:=false) -> EntityDelta {
     d := EntityDelta{}
-    if prev.body != cur.body {
+    if prev.body != cur.body || all {
         d.delta |= EDD_POS
         d.body   = cur.body
     }
-    if prev.status != cur.status {
+    if prev.status != cur.status || all {
         d.delta  |= EDD_STATUS
         d.status  = cur.status
     }
-    if prev.texture != cur.texture {
+    if prev.texture != cur.texture || all {
         d.delta  |= EDD_TEXTURE
         d.texture = cur.texture
     }
-    if prev.health != cur.health {
+    if prev.health != cur.health || all {
         d.delta  |= EDD_HEALTH
         d.health = cur.health
     }
@@ -56,7 +56,7 @@ implement_entity_delta :: proc(entity: ^Entity, delta: ^EntityDelta) {
     if delta.delta & EDD_HEALTH != 0 { entity.health    = delta.health }
 }
 
-pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta) {
+pack_entity :: proc(buf: ^buffer_io.Buffer, e: ^EntityDelta, all := false) {
     buffer_io.buffer_write_u16(buf, e.delta)
     if e.delta & EDD_POS != 0 {
         buffer_io.buffer_write_f32(buf, e.body.x)
@@ -269,7 +269,8 @@ AbilityKind :: enum {
     Spell,
 }
 EntityAbility :: struct {
-    ability_id: int, // indexes into game.abilities
-    level: int,
+    ability_id: u32, // indexes into game.abilities
+    level: u32,
+    cooldown, cooldown_time: f32, // current cooldown to cast again and it's cooldown
     upgrade_requirements: struct{}, // some other time
 }

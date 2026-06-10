@@ -62,24 +62,32 @@ unapply_camera :: proc {
 }
 
 State :: struct {
-    player_handle:    int,
-    entities_lock:    sync.Mutex,
+    player_handle:      int,
+    state_lock:         sync.Mutex,
     // server entities
-    state_entities:   map[game.EntityHandle]game.Entity,
+    state_entities:     map[game.EntityHandle]game.Entity,
     // interpolates from server entities
-    current_entities: map[game.EntityHandle]game.Entity,
-    camera:           raylib.Rectangle,
-    assets:           game.AssetManger,
-    frame_arena:      mem.Dynamic_Arena,
-    logs:             [dynamic]string,
-    socket:           net.UDP_Socket,
-    connected:        bool,
-    server_endpoint:  net.Endpoint,
-    ping:             f32,
-    pings:            map[u8]time.Time,
-    draws:            [dynamic]DrawCommand,
-    gmap:             game.Map,
-    toggle_views:     bool,
+    current_entities:   map[game.EntityHandle]game.Entity,
+    camera:             raylib.Rectangle,
+    assets:             game.AssetManger,
+    frame_arena:        mem.Dynamic_Arena,
+    logs:               [dynamic]string,
+    socket:             net.UDP_Socket,
+    connected:          bool,
+    server_endpoint:    net.Endpoint,
+    ping:               f32,
+    pings:              map[u8]time.Time,
+    draws:              [dynamic]DrawCommand,
+    gmap:               game.Map,
+    toggle_views:       bool,
+    move_to:            raylib.Vector2,
+    abilities:          [ABILITIES_COUNT]PlayerAbility,
+    energy:             f32,
+}
+PlayerAbility :: struct {
+    ability_id: u32,
+    level: u32,
+    cooldown: f32,
 }
 InputHandler :: struct {
     action: proc(game: ^State),
@@ -317,6 +325,25 @@ init_game_con :: proc(s: ^State) -> i32 {
     s.connected = true
     return 0
 }
+user_specific_data :: struct {
+    energy: f32,
+    abilities: [ABILITIES_COUNT]PlayerAbility,
+    move_to: raylib.Vector2,
+}
+ABILITIES_COUNT :: game.ABILITIES_COUNT
+unpack_user_specific_data :: proc(b: ^buffer_io.Buffer) -> user_specific_data {
+    u := user_specific_data{};
+    ok := false;
+    u.energy, ok = buffer_io.buffer_read_f32(b);  assert(ok);
+    for i in 0..<ABILITIES_COUNT {
+        u.abilities[i].ability_id, ok = buffer_io.buffer_read_u32(b);  assert(ok);
+        u.abilities[i].level, ok = buffer_io.buffer_read_u32(b);  assert(ok);
+        u.abilities[i].cooldown, ok = buffer_io.buffer_read_f32(b);  assert(ok);
+    }
+    u.move_to.x, ok = buffer_io.buffer_read_f32(b);  assert(ok);
+    u.move_to.y, ok = buffer_io.buffer_read_f32(b);  assert(ok);
+    return u;
+}
 receiver_thread :: proc(s: ^State) {
     buf := buffer_io.buffer_make(1024)
     last := time.now()
@@ -341,9 +368,17 @@ receiver_thread :: proc(s: ^State) {
         }
         // fmt.printfln("got %d bytes (msg %d).", n, msg);
         if msg == networking.MSG_GAME_DATA {
-            sync.mutex_lock(&s.entities_lock)
+            sync.lock(&s.state_lock); {
+                // unpack user specific data
+                user_specific := unpack_user_specific_data(&buf)
+                s.move_to = user_specific.move_to;
+                s.abilities = user_specific.abilities;
+                s.energy = user_specific.energy;
+            }; sync.unlock(&s.state_lock)
+
             count, ok := buffer_io.buffer_read_u32(&buf)
             assert(ok)
+            sync.lock(&s.state_lock);
             for i in 0 ..< count {
                 id, ok := buffer_io.buffer_read_u32(&buf)
                 delta := game.EntityDelta{}
@@ -356,7 +391,7 @@ receiver_thread :: proc(s: ^State) {
                 game.implement_entity_delta(&last, &delta);
                 s.state_entities[id] = last
             }
-            sync.mutex_unlock(&s.entities_lock)
+            sync.mutex_unlock(&s.state_lock)
         } else if msg == networking.MSG_PING_RESPOND {
             pingid, ok := buffer_io.buffer_read_i32(&buf)
             assert(ok)
@@ -369,6 +404,9 @@ receiver_thread :: proc(s: ^State) {
             now := time.now()
             diff := time.diff(now, last)
             s.ping = f32(diff) / f32(time.Millisecond)
+        } else {
+            fmt.println(msg)
+            panic("Unknown message")
         }
 
         buffer_io.buffer_reset(&buf)
@@ -472,7 +510,7 @@ main :: proc() {
         dt := raylib.GetFrameTime()
         // copy entities
         // clear_map(&s.current_entities)
-        sync.lock(&s.entities_lock)
+        sync.lock(&s.state_lock)
         for k, e in s.state_entities {
             copy := e
             current, ok := s.current_entities[k]
@@ -495,7 +533,7 @@ main :: proc() {
             }
             s.current_entities[k] = copy
         }
-        sync.unlock(&s.entities_lock)
+        sync.unlock(&s.state_lock)
         // get player info
         pok: bool
         pref, pok = s.current_entities[ID]
@@ -525,6 +563,14 @@ main :: proc() {
         append(
             &s.logs,
             fmt.aprintf("ping? :%.5f", s.ping, allocator = s.frame_arena.block_allocator),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf("move_to: %.0f:%.0f", s.move_to.x, s.move_to.y, allocator = s.frame_arena.block_allocator),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf("energy: %.0f", s.energy, allocator = s.frame_arena.block_allocator),
         )
         append(
             &s.logs,
@@ -586,12 +632,17 @@ main :: proc() {
                 raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
             }
         }
+        // bother later
         flush_draws_scale(&s)
+        if raylib.Vector2Distance(game.rect_pos(pref.body), s.move_to) > 0.5 {
+            draw_rect(&s, apply_camera(&s, s.move_to)+game.rect_size(pref.body)/2, raylib.Vector2{2,2});
+        } else {
+        }
         // draw UI
-        {// i here conflicts with ping i
+        if s.toggle_views {// i here conflicts with ping i
             i: i32 = 0
             h: f32 = f32(len(s.logs) * 24 + 10 + 20)
-            draw_rect_no_scale(&s, pos = {0, 0}, size = {200, h}, tint = {0, 0, 0, 123})
+            draw_rect_no_scale(&s, pos = {0, 0}, size = {SCREEN_WIDTH, h}, tint = {0, 0, 0, 123})
             for l in s.logs {
                 cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator)
                 draw_text_no_scale(

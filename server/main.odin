@@ -21,13 +21,18 @@ when ODIN_VERSION < MIN_ODIN {
 @private
 Client :: struct {
     entity: game.Entity,
+    energy: f32,
+    max_energy: f32,
     last_entity: game.Entity,
     endpoint: net.Endpoint,
     last_ping: time.Time,
     move_to: raylib.Vector2,
     move_origin:raylib.Vector2,
-    abilities: [6]game.EntityAbility,
+    abilities: [ABILITIES_COUNT]game.EntityAbility,
 }
+
+
+ABILITIES_COUNT ::  game.ABILITIES_COUNT
 Ability :: struct {
     kind: game.AbilityKind,
     action: proc(level: int)
@@ -95,7 +100,12 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         strings.builder_destroy(&b)
     } else if msg == networking.MSG_GET_STATE {
         b := buffer_io.buffer_make(1024);
-        n := game_pack_all(g, &b);
+        sync.lock(&g.entities_lock)
+        for k, c in g.entities {
+            fmt.println(c.entity.id, c.entity.body)
+        }
+        sync.unlock(&g.entities_lock)
+        n := game_pack_all(g, &b, all = true);
         nn, e := net.send_udp(g.socket, b.data[:n], endpoint);
         if e != .None{
             panic("Failed to send state to client?");
@@ -178,12 +188,12 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         panic("unknown message");
     }
 }
-game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer) -> int {
+game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     buffer_io.buffer_reset(buf);
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     sync.mutex_lock(&g.entities_lock);
     for k, e in g.entities {
-        delta := game.get_entity_delta(e.last_entity, e.entity);
+        delta := game.get_entity_delta(e.last_entity, e.entity, all = all);
         if delta.delta > 0 {
             fmt.println("Delta:", delta);
         }
@@ -261,23 +271,38 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
         panic("Had to check 3 times for collisions");
     }
     c.last_entity = last_current_entity
+    if c.entity.body.width <= 1 || c.entity.body.height <= 1 {
+        fmt.println(c)
+        panic("body size too small");
+    }
 }
-MAX_TIMEOUT :: 10
-pack_user_specific_data :: proc(buf: []byte) {
+MAX_TIMEOUT :: 10 * time.Second
+// straight garbage basically. stress test, if you will
+pack_user_specific_data :: proc(c: snapshot_entry, buf: ^buffer_io.Buffer) {
+    buffer_io.buffer_write_f32(buf, c.energy)
+    for i in 0..<ABILITIES_COUNT {
+        buffer_io.buffer_write_u32(buf, c.abilities[i].ability_id)
+        buffer_io.buffer_write_u32(buf, c.abilities[i].level)
+        buffer_io.buffer_write_f32(buf, c.abilities[i].cooldown)
+    }
+    buffer_io.buffer_write_f32(buf, c.move_to.x)
+    buffer_io.buffer_write_f32(buf, c.move_to.y)
+    
 }
+
 snapshot_entry :: struct {
-    endpoint:net.Endpoint,
     k: game.EntityHandle,
-    last_ping:time.Time,
+    using c: Client,
 }
 // user message:
 // [user specific data][game data]
 handle_sender_loop :: proc(g: ^Game, n: int) {
     duration := time.Duration(n) * time.Millisecond
-    buf := buffer_io.buffer_make(1024);
+    buf := buffer_io.buffer_make(1024); // make once
     to_remove := make([dynamic]game.EntityHandle);
     endpoints := make([dynamic]snapshot_entry);
     dt : f32 = 0;
+    user_buf := buffer_io.buffer_make(1024) // make once
     for {
         start := time.now()
         sync.mutex_lock(&g.entities_lock);
@@ -287,26 +312,36 @@ handle_sender_loop :: proc(g: ^Game, n: int) {
             g.entities[k] = c;
         }
         sync.mutex_unlock(&g.entities_lock);
-        // for ping
-
-        buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
+        //  write in loop before user specific data
+        // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
         sync.mutex_lock(&g.entities_lock);
         pack_game_loop_data(g, &buf);
         for k, e in g.entities {
-            append(&endpoints, snapshot_entry{e.endpoint,k,e.last_ping})
+            append(&endpoints, snapshot_entry{k,e})
         }
         sync.mutex_unlock(&g.entities_lock);
         last := time.now()
         for k in endpoints {
             elapsed := math.abs(time.diff(last, k.last_ping));
-             if elapsed > MAX_TIMEOUT *time.Second {
+             if elapsed > MAX_TIMEOUT {
                  append(&to_remove, k.k)
              } else {
-                 sn, err := net.send_udp(g.socket, buf.data[:buf.len], k.endpoint);
+                 buffer_io.buffer_reset(&user_buf)
+                 buffer_io.buffer_write_u8(&user_buf, networking.MSG_GAME_DATA);
+                 pack_user_specific_data(k, &user_buf)
+                 // only write to buf.len, which is bytes of relevant data
+                 wrote, ok := buffer_io.buffer_write_bytes(&user_buf, buf.data[:buf.len])
+                 if ! ok {
+                     fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
+                     fmt.println(buf.len, buf.cap, len(buf.data))
+                 }
+                 assert(ok);
+                 assert(wrote == buf.len)
+                 sn, err := net.send_udp(g.socket, user_buf.data[:user_buf.len], k.endpoint);
                  if err != .None {
                      panic("err in sending to client");
                  }
-                 if sn != buf.len {
+                 if sn != user_buf.len {
                      panic("Didn't send all bytes");
                  }
              }

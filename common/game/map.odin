@@ -130,7 +130,6 @@ new_random_map_item :: proc(m: ^Map, c: ^Chunk, x, y: int) {
     item.src_rect = rock if int(10*fbm_xyos(f32(x),f32(y),m.octaves, m.seed*x*y)) % 2 == 0 else rock_2;
     item.x = f32(c.cid.x*CHUNK_SIZE+x) * TILES_SIZE
     item.y = f32(c.cid.y*CHUNK_SIZE+y) * TILES_SIZE
-    fmt.println(item.rect, c.cid)
     item.width = TILES_SIZE
     item.height = TILES_SIZE
     append(&c.drawables, item);
@@ -147,7 +146,6 @@ gen_chunk_items :: proc(m: ^Map, c: ^Chunk) {
             y = chunk_rand(c.cid, 69)%CHUNK_SIZE;
             k+=1
         }
-        fmt.println(c.cid,x, y)
         new_random_map_item(m, c, x, y);
         
     }
