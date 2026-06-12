@@ -1,9 +1,7 @@
 package networking
 
-import "core:strings"
 import "core:fmt"
 import "core:net";
-import "project:common/buffer_io"
 MSG_INDICIES :: u8;
 MSG_CONNECT :: 1;
 MSG_DATA :: 2;

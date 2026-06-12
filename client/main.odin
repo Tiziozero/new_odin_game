@@ -63,6 +63,7 @@ unapply_camera :: proc {
 
 State :: struct {
     player_handle:      int,
+    spref:              game.Entity,
     state_lock:         sync.Mutex,
     // server entities
     state_entities:     map[game.EntityHandle]game.Entity,
@@ -195,9 +196,20 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
 }
 MAX_ZOOM_FACTOR :: 8
 MOUSE_DELTA :: 25
+send_user_ability :: proc(s: ^State, ability_index: u8) {
+    fmt.println("User ability:", ability_index);
+    b := buffer_io.buffer_make(64)
+    buffer_io.buffer_write_u8(&b, networking.MSG_USER_MSG);
+    buffer_io.buffer_write_u32(&b, ID)
+    buffer_io.buffer_write_u8(&b, game.USR_MSG_ABILITY)
+    buffer_io.buffer_write_u8(&b, ability_index)
+    n, nok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint)
+    assert(nok == .None)
+    buffer_io.buffer_destroy(&b)
+}
 handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
-    case .IE_SCROLL:
+    case .IE_SCROLL: // no scroll
         {
             // SCREEN_FACTOR += e.scroll_delta / MOUSE_DELTA
             // if SCREEN_FACTOR < 1 {SCREEN_FACTOR = 1}
@@ -206,14 +218,14 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
     case .IE_KEY_PRESSED:
         {
             #partial switch e.k {
-            case .A:
-                fmt.println("a")
-            case .D:
-                fmt.println("d")
+            case .Q:
+                send_user_ability(s, 0);
             case .W:
-                fmt.println("w")
-            case .S:
-                fmt.println("s")
+                send_user_ability(s, 1);
+            case .E:
+                send_user_ability(s, 2);
+            case .R:
+                send_user_ability(s, 3);
             case .T:
                 s.toggle_views = !s.toggle_views
             case .K:
@@ -224,8 +236,7 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
     case .IE_MB_PRESSED:
         {
             if e.mb == .RIGHT {     // move
-                p, ok := s.state_entities[ID]
-                assert(ok)
+                p := s.spref // player ref
                 sposx := (e.click.x - 0.5) * SCALED_SCREEN_WIDTH()
                 sposy := (e.click.y - 0.5) * SCALED_SCREEN_HEIGHT()
                 send_pos := raylib.Vector2{sposx, sposy} + game.rect_pos(p.body)
@@ -485,7 +496,7 @@ main :: proc() {
     s.pings = make(map[u8]time.Time)
 
 
-    player, pok := s.state_entities[ID]
+    spref, pok := s.state_entities[ID]
     if !pok {
         panic("no player in entities")
     }
@@ -499,11 +510,10 @@ main :: proc() {
     }
     i := 0
     ping_id: u8 = 0
-    pref: game.Entity
     s.gmap = game.new_map();
     target := raylib.LoadRenderTexture(i32(SCREEN_WIDTH) * 4, i32(SCREEN_HEIGHT) * 4) // copy
                                                                                       // main loop
-    fmt.println(ODIN_VERSION)
+    fmt.println("odin version:", ODIN_VERSION)
     // for sorted
     sorted := make([dynamic]SortedDrawElement)
     for !raylib.WindowShouldClose() && s.connected {
@@ -511,8 +521,12 @@ main :: proc() {
         // copy entities
         // clear_map(&s.current_entities)
         sync.lock(&s.state_lock)
+        other: [1024]game.Entity
+        j := 0
         for k, e in s.state_entities {
             copy := e
+            other[j]=e
+            j+=1
             current, ok := s.current_entities[k]
             if !ok {
                 fmt.println("New entity from server:", e)
@@ -523,7 +537,8 @@ main :: proc() {
                 p2 := game.rect_pos(copy.body)
                 if raylib.Vector2Distance(p1, p2) > game.ENTITY_SPEED * dt {
                     d := raylib.Vector2Normalize(p2 - p1)
-                    new_pos = p1 + d * game.ENTITY_SPEED * dt
+                    s :f32 = game.ENTITY_SPEED
+                    new_pos = p1 + d* s * dt
                 } else {
                     // copy body over
                     new_pos = p2
@@ -533,11 +548,12 @@ main :: proc() {
             }
             s.current_entities[k] = copy
         }
+        pref, pok := s.state_entities[ID] // set to server entity
+        assert(pok)
+        s.spref = s.current_entities[ID] // set spref to what player sees
+        assert(pok)
         sync.unlock(&s.state_lock)
         // get player info
-        pok: bool
-        pref, pok = s.current_entities[ID]
-        assert(pok)
         append(&s.logs, "Hello, World!!")
         rl_to_game(&events)
         append(&s.logs, "events!")
@@ -546,17 +562,26 @@ main :: proc() {
             &s.logs,
             fmt.aprintf(
                 "pos  :%.0f %.0f",
-                player.body.x,
-                player.body.y,
+                s.spref.body.x,
+                s.spref.body.y,
                 allocator = s.frame_arena.block_allocator,
             ),
         )
         append(
             &s.logs,
             fmt.aprintf(
-                "spos :%.0f %.0f",
+                "spos       :%.0f %.0f",
                 pref.body.x,
                 pref.body.y,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "s state pos:%.0f %.0f",
+                s.spref.body.x,
+                s.spref.body.y,
                 allocator = s.frame_arena.block_allocator,
             ),
         )
@@ -602,13 +627,17 @@ main :: proc() {
             ),
         )
         // update camera
-        s.camera.x = pref.body.x - SCREEN_WIDTH / 2 + pref.body.width / 2
-        s.camera.y = pref.body.y - SCREEN_HEIGHT / 2 + pref.body.height / 2
+        s.camera.x = s.spref.body.x - SCREEN_WIDTH / 2 + pref.body.width / 2
+        s.camera.y = s.spref.body.y - SCREEN_HEIGHT / 2 + pref.body.height / 2
         // not since all draw calls are scaled
         s.camera.width = SCALED_SCREEN_WIDTH()
         s.camera.height = SCALED_SCREEN_HEIGHT()
 
         draw_game(&s, pref, &sorted)
+        for o in other[:j] {
+            // c := o
+            // draw_entity(&s, s.camera, &c);
+        }
         // draw game first
         if false {
             if s.toggle_views {     // normal view with flush 2
@@ -634,8 +663,8 @@ main :: proc() {
         }
         // bother later
         flush_draws_scale(&s)
-        if raylib.Vector2Distance(game.rect_pos(pref.body), s.move_to) > 0.5 {
-            draw_rect(&s, apply_camera(&s, s.move_to)+game.rect_size(pref.body)/2, raylib.Vector2{2,2});
+        if raylib.Vector2Distance(game.rect_pos(s.spref.body), s.move_to) > 0.5 {
+            draw_rect(&s, apply_camera(&s, s.move_to)+game.rect_size(s.spref.body)/2, raylib.Vector2{2,2});
         } else {
         }
         // draw UI
@@ -644,6 +673,7 @@ main :: proc() {
             h: f32 = f32(len(s.logs) * 24 + 10 + 20)
             draw_rect_no_scale(&s, pos = {0, 0}, size = {SCREEN_WIDTH, h}, tint = {0, 0, 0, 123})
             for l in s.logs {
+                // fmt.println(l)
                 cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator)
                 draw_text_no_scale(
                     &s,

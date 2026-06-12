@@ -17,18 +17,20 @@ when ODIN_VERSION < MIN_ODIN {
 }
 
 
-
 @private
 Client :: struct {
     entity: game.Entity,
     energy: f32,
     max_energy: f32,
+    max_health: f32,
+    attack: f32,
     last_entity: game.Entity,
     endpoint: net.Endpoint,
     last_ping: time.Time,
     move_to: raylib.Vector2,
     move_origin:raylib.Vector2,
     abilities: [ABILITIES_COUNT]game.EntityAbility,
+    projectiles: [dynamic]game.Projectile,
 }
 
 
@@ -80,11 +82,13 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         sync.mutex_lock(&g.entities_lock);
         c := Client{}
         c.endpoint = endpoint;
+        c.max_health = 100
+        c.attack = 15
         t := u32(rand.int31()%i32(len(g.assets.assets)));
-        fmt.println(t, len(g.assets.assets));
+        // fmt.println(t, len(g.assets.assets));
         c.entity = game.Entity{
             texture=t,
-            health=100,
+            health=c.max_health,
             body= raylib.Rectangle{0,0,32,32}
         };
         c.move_to = raylib.Vector2{0,0}
@@ -143,23 +147,6 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         buffer_io.buffer_destroy(&b);
     } else if msg == networking.MSG_USER_DATA {
         panic("no");
-        /*id, ok := buffer_io.buffer_read_u32(buf);
-        if !ok {
-            panic("Failed to read u32, user id for connect");
-        }
-        delta := game.EntityDelta{};
-        game.unpack_entity(buf, &delta);
-        sync.mutex_lock(&g.entities_lock);
-        last, lok := g.entities[game.EntityHandle(id)];
-        if !lok {
-            fmt.println(id)
-            panic("entity doesn't exist");
-        }
-        //game.implement_entity_delta(&last.entity, )
-        last.entity.body = delta.body;
-        last.last_ping = time.now();
-        g.entities[game.EntityHandle(id)] = last;
-        sync.mutex_unlock(&g.entities_lock);*/
     } else if msg == networking.MSG_USER_MSG {
         id, ok := buffer_io.buffer_read_u32(buf);
         assert(ok);
@@ -182,10 +169,26 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
                 g.entities[id] = last;
                 sync.unlock(&g.entities_lock);
             }
+            case game.USR_MSG_ABILITY: {
+                index, ok := buffer_io.buffer_read_u8(buf);
+                fmt.println("Ability cast:", index)
+                cast_ability(g, id, index);
+            }
         case: panic("Handle case");
         }
     } else {
         panic("unknown message");
+    }
+}
+cast_ability :: proc(g: ^Game, id: u32, index: u8) {
+    assert(index < ABILITIES_COUNT);
+    sync.lock(&g.entities_lock)
+    e, ok := g.entities[id]; assert(ok);
+    sync.unlock(&g.entities_lock)
+    ability := e.abilities[index]
+    if ! ability.active {
+        fmt.println("Ability", index, "is inactive.");
+        return
     }
 }
 game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
@@ -203,7 +206,7 @@ game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     sync.mutex_unlock(&g.entities_lock);
     return buf.len;
 }
-handle_receiver_loop :: proc(g: ^Game, n: int) {
+handle_receiver_loop :: proc(g: ^Game) {
     buf := buffer_io.buffer_make(1024);
     for {
         n, endpoint, err := net.recv_udp(g.socket, buf.data[:]);
@@ -231,7 +234,9 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
     last_current_entity := c.entity;
     current_pos := game.rect_pos(c.entity.body)
     d := raylib.Vector2Normalize(c.move_to - current_pos)
-    next_pos := current_pos + d * game.ENTITY_SPEED * dt
+    assert(raylib.Vector2Length(d) <= 1.01)
+    mag := game.ENTITY_SPEED * dt
+    next_pos := current_pos + d * mag
 
     reached := raylib.Vector2Distance(current_pos, c.move_to) <=
                raylib.Vector2Distance(current_pos, next_pos)
@@ -241,7 +246,6 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
     c.entity.body.x = target.x
     c.entity.body.y = target.y
     i := 0
-    // fmt.println(reached, target,c.move_to)
     for i < 3 { // 3 iterations because collision checks one wall at a time,
                 // so if the entity's colliding against two perpendiculat walls,
                 // only one's checked at a time
@@ -296,13 +300,14 @@ snapshot_entry :: struct {
 }
 // user message:
 // [user specific data][game data]
-handle_sender_loop :: proc(g: ^Game, n: int) {
-    duration := time.Duration(n) * time.Millisecond
+handle_sender_loop :: proc(g: ^Game) {
+    duration := time.Duration(10) * time.Millisecond
     buf := buffer_io.buffer_make(1024); // make once
     to_remove := make([dynamic]game.EntityHandle);
     endpoints := make([dynamic]snapshot_entry);
     dt : f32 = 0;
     user_buf := buffer_io.buffer_make(1024) // make once
+    i := 0;
     for {
         start := time.now()
         sync.mutex_lock(&g.entities_lock);
@@ -312,68 +317,74 @@ handle_sender_loop :: proc(g: ^Game, n: int) {
             g.entities[k] = c;
         }
         sync.mutex_unlock(&g.entities_lock);
-        //  write in loop before user specific data
-        // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
-        sync.mutex_lock(&g.entities_lock);
-        pack_game_loop_data(g, &buf);
-        for k, e in g.entities {
-            append(&endpoints, snapshot_entry{k,e})
-        }
-        sync.mutex_unlock(&g.entities_lock);
-        last := time.now()
-        for k in endpoints {
-            elapsed := math.abs(time.diff(last, k.last_ping));
-             if elapsed > MAX_TIMEOUT {
-                 append(&to_remove, k.k)
-             } else {
-                 buffer_io.buffer_reset(&user_buf)
-                 buffer_io.buffer_write_u8(&user_buf, networking.MSG_GAME_DATA);
-                 pack_user_specific_data(k, &user_buf)
-                 // only write to buf.len, which is bytes of relevant data
-                 wrote, ok := buffer_io.buffer_write_bytes(&user_buf, buf.data[:buf.len])
-                 if ! ok {
-                     fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
-                     fmt.println(buf.len, buf.cap, len(buf.data))
-                 }
-                 assert(ok);
-                 assert(wrote == buf.len)
-                 sn, err := net.send_udp(g.socket, user_buf.data[:user_buf.len], k.endpoint);
-                 if err != .None {
-                     panic("err in sending to client");
-                 }
-                 if sn != user_buf.len {
-                     panic("Didn't send all bytes");
-                 }
-             }
-        }
-        if len(to_remove) > 0 {
+        // send data once every 3 updates
+        if i < 3 {
+            i+=1
+        } else {
+            i = 0
+            //  write in loop before user specific data
+            // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
             sync.mutex_lock(&g.entities_lock);
-            for k in to_remove {
-                fmt.println("Removing:", k, "from", len(g.entities), "entities");
-                delete_key(&g.entities,k);
+            pack_game_loop_data(g, &buf);
+            for k, e in g.entities {
+                append(&endpoints, snapshot_entry{k,e})
             }
-            clear_dynamic_array(&to_remove);
             sync.mutex_unlock(&g.entities_lock);
-        }
-        // clear
-        buffer_io.buffer_reset(&buf);
-        clear_dynamic_array(&endpoints)
+            last := time.now()
+            for k in endpoints {
+                elapsed := math.abs(time.diff(last, k.last_ping));
+                         if elapsed > MAX_TIMEOUT {
+                             append(&to_remove, k.k)
+                         } else {
+                             buffer_io.buffer_reset(&user_buf)
+                             buffer_io.buffer_write_u8(&user_buf, networking.MSG_GAME_DATA);
+                             pack_user_specific_data(k, &user_buf)
+                             // only write to buf.len, which is bytes of relevant data
+                             wrote, ok := buffer_io.buffer_write_bytes(&user_buf, buf.data[:buf.len])
+                             if ! ok {
+                                 fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
+                                 fmt.println(buf.len, buf.cap, len(buf.data))
+                             }
+                             assert(ok);
+                             assert(wrote == buf.len)
+                             sn, err := net.send_udp(g.socket, user_buf.data[:user_buf.len], k.endpoint);
+                             if err != .None {
+                                 panic("err in sending to client");
+                             }
+                             if sn != user_buf.len {
+                                 panic("Didn't send all bytes");
+                             }
+                         }
+                     }
+                     if len(to_remove) > 0 {
+                         sync.mutex_lock(&g.entities_lock);
+                         for k in to_remove {
+                             fmt.println("Removing:", k, "from", len(g.entities), "entities");
+                             delete_key(&g.entities,k);
+                         }
+                         clear_dynamic_array(&to_remove);
+                         sync.mutex_unlock(&g.entities_lock);
+                     }
+                     // clear
+                     buffer_io.buffer_reset(&buf);
+                     clear_dynamic_array(&endpoints)
 
+        }
         elapsed := time.since(start)
         if elapsed < duration {
             // inacurate on wls, sometimes jumps to 2.9 seconds wait
             time.sleep(duration - elapsed)
         }
-        elapsed = time.since(start) // with sleep
-        dt = f32(elapsed)/f32(time.Second)
+        dt_elapsed := time.since(start) // with sleep
+        dt = f32(dt_elapsed)/f32(time.Second)
     }
 }
 
 thread_receiver_fn :: proc(data: rawptr) {
-    handle_receiver_loop(transmute(^Game)data, 20);
+    handle_receiver_loop(transmute(^Game)data);
 }
 thread_sender_fn :: proc(data: rawptr) {
-    handle_sender_loop(transmute(^Game)data, 20);
+    handle_sender_loop(transmute(^Game)data);
 }
 
 import "core:sys/windows"

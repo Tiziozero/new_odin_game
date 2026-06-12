@@ -10,6 +10,7 @@ import "project:common/buffer_io"
 ABILITIES_COUNT :: 6
 
 USR_MSG_MOVE:: 1;
+USR_MSG_ABILITY:: 2;
 
 SCREEN_SIZE :: raylib.Vector2{1200,900}
 EntityDeltaData :: u16 // each field, like position, status, texture and what not
@@ -273,4 +274,9 @@ EntityAbility :: struct {
     level: u32,
     cooldown, cooldown_time: f32, // current cooldown to cast again and it's cooldown
     upgrade_requirements: struct{}, // some other time
+    active: bool,
+}
+// have projectiles be "spawn data + hit msg" for game to send to clients
+// and clients predict movement.
+Projectile :: struct {
 }
