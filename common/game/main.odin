@@ -279,4 +279,31 @@ EntityAbility :: struct {
 // have projectiles be "spawn data + hit msg" for game to send to clients
 // and clients predict movement.
 Projectile :: struct {
+    origin, direction, position: raylib.Vector2,
+    active: bool, // is active
+    projectile_id, id: u32, // what projectile it is and which projectile it is
+                            // what kind and which individually
+}
+pack_projectile_spawn_data :: proc (p: Projectile, b: ^buffer_io.Buffer) {
+    buffer_io.buffer_write_u32(b, p.id)
+    buffer_io.buffer_write_u32(b, p.projectile_id)
+    buffer_io.buffer_write_f32(b, p.origin.x)
+    buffer_io.buffer_write_f32(b, p.origin.y)
+    buffer_io.buffer_write_f32(b, p.direction.y)
+    buffer_io.buffer_write_f32(b, p.direction.x)
+    buffer_io.buffer_write_f32(b, p.position.x)
+    buffer_io.buffer_write_f32(b, p.position.y)
+}
+unpack_projectile_spawn_data :: proc (b: ^buffer_io.Buffer) -> Projectile {
+    ok: bool
+    p: Projectile
+    p.id, ok = buffer_io.buffer_read_u32(b); assert(ok)
+    p.projectile_id, ok = buffer_io.buffer_read_u32(b); assert(ok)
+    p.origin.x, ok = buffer_io.buffer_read_f32(b); assert(ok)
+    p.origin.y, ok = buffer_io.buffer_read_f32(b); assert(ok)
+    p.direction.x, ok = buffer_io.buffer_read_f32(b); assert(ok)
+    p.direction.y, ok = buffer_io.buffer_read_f32(b); assert(ok)
+    p.position.x, ok = buffer_io.buffer_read_f32(b); assert(ok)
+    p.position.y, ok = buffer_io.buffer_read_f32(b); assert(ok)
+    return p
 }

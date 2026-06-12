@@ -30,10 +30,8 @@ Client :: struct {
     move_to: raylib.Vector2,
     move_origin:raylib.Vector2,
     abilities: [ABILITIES_COUNT]game.EntityAbility,
-    projectiles: [dynamic]game.Projectile,
 }
-
-
+PROJECTILES_COUNT :: 1024
 ABILITIES_COUNT ::  game.ABILITIES_COUNT
 Ability :: struct {
     kind: game.AbilityKind,
@@ -43,6 +41,8 @@ Ability :: struct {
 Game :: struct {
     abilities: map[int]Ability,
     entities: map[game.EntityHandle]Client,
+    projectiles: [PROJECTILES_COUNT]game.Projectile, // server_side_projectiles
+    projectiles_count: u32,
     entities_lock: sync.Mutex,
     socket: net.UDP_Socket,
     assets: game.AssetManger,
@@ -109,7 +109,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
             fmt.println(c.entity.id, c.entity.body)
         }
         sync.unlock(&g.entities_lock)
-        n := game_pack_all(g, &b, all = true);
+        n := pack_game(g, &b, all = true);
         nn, e := net.send_udp(g.socket, b.data[:n], endpoint);
         if e != .None{
             panic("Failed to send state to client?");
@@ -180,6 +180,18 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         panic("unknown message");
     }
 }
+gpid :u32= 0
+add_projectile :: proc(g: ^Game, i: game.Projectile) {
+    p := i
+    sync.lock(&g.entities_lock);
+    defer sync.unlock(&g.entities_lock);
+    assert(g.projectiles_count < PROJECTILES_COUNT);
+    p.active = true
+    p.id = gpid
+    gpid += 1;
+    g.projectiles[g.projectiles_count] = p
+    g.projectiles_count += 1;
+}
 cast_ability :: proc(g: ^Game, id: u32, index: u8) {
     assert(index < ABILITIES_COUNT);
     sync.lock(&g.entities_lock)
@@ -191,7 +203,7 @@ cast_ability :: proc(g: ^Game, id: u32, index: u8) {
         return
     }
 }
-game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
+pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     buffer_io.buffer_reset(buf);
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     sync.mutex_lock(&g.entities_lock);
@@ -202,6 +214,13 @@ game_pack_all :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
         }
         buffer_io.buffer_write_u32(buf, u32(k));
         game.pack_entity(buf, &delta);
+    }
+    if all { // pacl projectiles
+        buffer_io.buffer_write_u32(buf, g.projectiles_count);
+        for i in 0..<g.projectiles_count {
+        }
+    } else {
+        buffer_io.buffer_write_u32(buf, 0);
     }
     sync.mutex_unlock(&g.entities_lock);
     return buf.len;
