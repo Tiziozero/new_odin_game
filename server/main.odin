@@ -105,7 +105,8 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
     } else if msg == networking.MSG_GET_STATE {
         b := buffer_io.buffer_make(1024);
         sync.lock(&g.entities_lock)
-        for k, c in g.entities {
+            fmt.println("Get game state:")
+        for k, c in g.entities { 
             fmt.println(c.entity.id, c.entity.body)
         }
         sync.unlock(&g.entities_lock)
@@ -210,7 +211,7 @@ pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     for k, e in g.entities {
         delta := game.get_entity_delta(e.last_entity, e.entity, all = all);
         if delta.delta > 0 {
-            fmt.println("Delta:", delta);
+            // fmt.println("Delta:", delta);
         }
         buffer_io.buffer_write_u32(buf, u32(k));
         game.pack_entity(buf, &delta);
@@ -219,10 +220,10 @@ pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
         buffer_io.buffer_write_u32(buf, g.projectiles_count);
         for i in 0..<g.projectiles_count {
         }
-    } else {
-        buffer_io.buffer_write_u32(buf, 0);
     }
+    buffer_io.buffer_write_u32(buf, 0);
     sync.mutex_unlock(&g.entities_lock);
+    // 0 at the end
     return buf.len;
 }
 handle_receiver_loop :: proc(g: ^Game) {
@@ -241,12 +242,7 @@ handle_receiver_loop :: proc(g: ^Game) {
     }
 }
 pack_game_loop_data :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
-    buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
-    for k, e in g.entities {
-        buffer_io.buffer_write_u32(buf, u32(k));
-        delta := game.get_entity_delta(e.last_entity, e.entity);
-        game.pack_entity(buf, &delta);
-    }
+    pack_game(g, buf)
 }
 
 update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
@@ -343,12 +339,12 @@ handle_sender_loop :: proc(g: ^Game) {
             i = 0
             //  write in loop before user specific data
             // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
-            sync.mutex_lock(&g.entities_lock);
             pack_game_loop_data(g, &buf);
+            sync.lock(&g.entities_lock);
             for k, e in g.entities {
                 append(&endpoints, snapshot_entry{k,e})
             }
-            sync.mutex_unlock(&g.entities_lock);
+            sync.unlock(&g.entities_lock);
             last := time.now()
             for k in endpoints {
                 elapsed := math.abs(time.diff(last, k.last_ping));

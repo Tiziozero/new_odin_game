@@ -281,8 +281,9 @@ EntityAbility :: struct {
 Projectile :: struct {
     origin, direction, position: raylib.Vector2,
     active: bool, // is active
-    projectile_id, id: u32, // what projectile it is and which projectile it is
-                            // what kind and which individually
+    // what kind and which individually
+    projectile_id : u32, // what projectile
+    id: u32, // which projectile
 }
 pack_projectile_spawn_data :: proc (p: Projectile, b: ^buffer_io.Buffer) {
     buffer_io.buffer_write_u32(b, p.id)

@@ -69,6 +69,9 @@ State :: struct {
     state_entities:     map[game.EntityHandle]game.Entity,
     // interpolates from server entities
     current_entities:   map[game.EntityHandle]game.Entity,
+
+    projectiles:        [dynamic]game.Projectile,
+    projectiles_count:  u32,
     camera:             raylib.Rectangle,
     assets:             game.AssetManger,
     frame_arena:        mem.Dynamic_Arena,
@@ -80,10 +83,11 @@ State :: struct {
     pings:              map[u8]time.Time,
     draws:              [dynamic]DrawCommand,
     gmap:               game.Map,
-    toggle_views:       bool,
+    debug:       bool,
     move_to:            raylib.Vector2,
     abilities:          [ABILITIES_COUNT]PlayerAbility,
     energy:             f32,
+    debug_last_packet_size: u32,
 }
 PlayerAbility :: struct {
     ability_id: u32,
@@ -107,6 +111,10 @@ InputEvent :: struct {
     mb:           raylib.MouseButton,
     click:        raylib.Vector2,
     scroll_delta: f32,
+}
+slog :: proc(s: ^State, format: string, str: ..any) {
+    log := fmt.aprintf(format, str, allocator=s.frame_arena.block_allocator)
+    append(&s.logs, log)
 }
 rl_to_game :: proc(events: ^[dynamic]InputEvent) {
     clear(events)
@@ -194,6 +202,10 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     draw_text_center(s, text = str, pos = tpos, size = 20, spacing = 5)
     // delete(cstr);
 }
+draw_projectile :: proc(s: ^State, p: ^game.Projectile) {
+    dr := apply_camera(s, p.position);
+    draw_rect(s, pos=dr, size=raylib.Vector2{1,1}, tint=raylib.YELLOW)
+}
 MAX_ZOOM_FACTOR :: 8
 MOUSE_DELTA :: 25
 send_user_ability :: proc(s: ^State, ability_index: u8) {
@@ -227,7 +239,7 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
             case .R:
                 send_user_ability(s, 3);
             case .T:
-                s.toggle_views = !s.toggle_views
+                s.debug = !s.debug
             case .K:
                 bool_snap = !bool_snap
             case:
@@ -355,6 +367,58 @@ unpack_user_specific_data :: proc(b: ^buffer_io.Buffer) -> user_specific_data {
     u.move_to.y, ok = buffer_io.buffer_read_f32(b);  assert(ok);
     return u;
 }
+unpack_game_data :: proc(s: ^State, buf: ^buffer_io.Buffer) {
+    // --- Entities ---
+    count, ok := buffer_io.buffer_read_u32(buf)
+    assert(ok)
+
+    sync.lock(&s.state_lock)
+    for i in 0 ..< count {
+        id, ok := buffer_io.buffer_read_u32(buf)
+        assert(ok)
+        delta := game.EntityDelta{}
+        game.unpack_entity(buf, &delta)
+
+        last, last_ok := s.state_entities[id]
+        if !last_ok {
+            last = game.Entity{}
+        }
+        last.id = id
+        game.implement_entity_delta(&last, &delta)
+        s.state_entities[id] = last
+    }
+    sync.unlock(&s.state_lock)
+    // --- Projectiles ---
+    ps, ps_ok := buffer_io.buffer_read_u32(buf)
+    assert(ps_ok)
+    // slog(s, "%d projectiles", ps)
+
+    if ps > 0 {
+        sync.lock(&s.state_lock)
+        // Grow slice if needed
+        for u32(len(s.projectiles)) < ps {
+            append(&s.projectiles, game.Projectile{})
+        }
+        for i in 0 ..< ps {
+            p := game.unpack_projectile_spawn_data(buf)
+            p.active = true
+            s.projectiles[i] = p
+        }
+        // Deactivate any old projectiles beyond the new count
+        for i in ps ..< u32(len(s.projectiles)) {
+            s.projectiles[i].active = false
+        }
+        s.projectiles_count = ps
+        sync.unlock(&s.state_lock)
+    } else {
+        sync.lock(&s.state_lock)
+        for i in 0 ..< u32(len(s.projectiles)) {
+            s.projectiles[i].active = false
+        }
+        s.projectiles_count = 0
+        sync.unlock(&s.state_lock)
+    }
+}
 receiver_thread :: proc(s: ^State) {
     buf := buffer_io.buffer_make(1024)
     last := time.now()
@@ -372,6 +436,9 @@ receiver_thread :: proc(s: ^State) {
             fmt.println(endpoint)
             panic("received msg from not server")
         }
+        sync.lock(&s.state_lock)
+        s.debug_last_packet_size = u32(n)
+        sync.unlock(&s.state_lock)
         buf.len = n
         msg, ok := buffer_io.buffer_read_u8(&buf)
         if !ok {
@@ -380,29 +447,13 @@ receiver_thread :: proc(s: ^State) {
         // fmt.printfln("got %d bytes (msg %d).", n, msg);
         if msg == networking.MSG_GAME_DATA {
             sync.lock(&s.state_lock); {
-                // unpack user specific data
                 user_specific := unpack_user_specific_data(&buf)
-                s.move_to = user_specific.move_to;
-                s.abilities = user_specific.abilities;
-                s.energy = user_specific.energy;
+                s.move_to    = user_specific.move_to
+                s.abilities  = user_specific.abilities
+                s.energy     = user_specific.energy
             }; sync.unlock(&s.state_lock)
 
-            count, ok := buffer_io.buffer_read_u32(&buf)
-            assert(ok)
-            sync.lock(&s.state_lock);
-            for i in 0 ..< count {
-                id, ok := buffer_io.buffer_read_u32(&buf)
-                delta := game.EntityDelta{}
-                game.unpack_entity(&buf, &delta)
-                last, last_ok := s.state_entities[id]
-                if !last_ok {
-                    last = game.Entity{}
-                }
-                last.id = id;
-                game.implement_entity_delta(&last, &delta);
-                s.state_entities[id] = last
-            }
-            sync.mutex_unlock(&s.state_lock)
+            unpack_game_data(s, &buf)
         } else if msg == networking.MSG_PING_RESPOND {
             pingid, ok := buffer_io.buffer_read_i32(&buf)
             assert(ok)
@@ -486,7 +537,7 @@ main :: proc() {
     raylib.SetTargetFPS(60)
     tiles = raylib.LoadTexture("imgs/ts9.png")
     s := State{}
-    s.toggle_views = true
+    s.debug = true
     s.assets = game.load_assets("imgs.json", load =false)
     if init_game_con(&s) != 0 {
         return
@@ -555,6 +606,8 @@ main :: proc() {
         sync.unlock(&s.state_lock)
         // get player info
         append(&s.logs, "Hello, World!!")
+        append(&s.logs, "Debug logs:")
+        slog(&s, "Last packet size: %d", s.debug_last_packet_size);
         rl_to_game(&events)
         append(&s.logs, "events!")
         append(&s.logs, fmt.aprintf("ID: %d", ID))
@@ -601,7 +654,7 @@ main :: proc() {
             &s.logs,
             fmt.aprintf(
                 "view :%d",
-                int(s.toggle_views) + 0,
+                int(s.debug) + 0,
                 allocator = s.frame_arena.block_allocator,
             ),
         )
@@ -634,13 +687,15 @@ main :: proc() {
         s.camera.height = SCALED_SCREEN_HEIGHT()
 
         draw_game(&s, pref, &sorted)
-        for o in other[:j] {
-            // c := o
-            // draw_entity(&s, s.camera, &c);
+        if s.debug {
+            for o in other[:j] {
+                c := o
+                draw_entity(&s, s.camera, &c);
+            }
         }
         // draw game first
         if false {
-            if s.toggle_views {     // normal view with flush 2
+            if s.debug {     // normal view with flush 2
                 raylib.BeginTextureMode(target)
                 raylib.ClearBackground(raylib.PURPLE)
                 flush_draws(&s)
@@ -668,7 +723,7 @@ main :: proc() {
         } else {
         }
         // draw UI
-        if s.toggle_views {// i here conflicts with ping i
+        if s.debug {// i here conflicts with ping i
             i: i32 = 0
             h: f32 = f32(len(s.logs) * 24 + 10 + 20)
             draw_rect_no_scale(&s, pos = {0, 0}, size = {SCREEN_WIDTH, h}, tint = {0, 0, 0, 123})
