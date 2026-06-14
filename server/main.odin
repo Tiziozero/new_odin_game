@@ -30,6 +30,8 @@ Client :: struct {
     move_to: raylib.Vector2,
     move_origin:raylib.Vector2,
     abilities: [ABILITIES_COUNT]game.EntityAbility,
+    // reliability layer
+    user_msg: u32, // increment when message successfull?
 }
 PROJECTILES_COUNT :: 1024
 ABILITIES_COUNT ::  game.ABILITIES_COUNT
@@ -39,7 +41,7 @@ Ability :: struct {
 }
 @private
 Game :: struct {
-    abilities: map[int]Ability,
+    abilities: map[u32]Ability,
     entities: map[game.EntityHandle]Client,
     projectiles: [PROJECTILES_COUNT]game.Projectile, // server_side_projectiles
     projectiles_count: u32,
@@ -198,11 +200,14 @@ cast_ability :: proc(g: ^Game, id: u32, index: u8) {
     sync.lock(&g.entities_lock)
     e, ok := g.entities[id]; assert(ok);
     sync.unlock(&g.entities_lock)
-    ability := e.abilities[index]
-    if ! ability.active {
+    user_ability := e.abilities[index]
+    if ! user_ability.active {
         fmt.println("Ability", index, "is inactive.");
         return
     }
+    ability_id := user_ability.ability_id;
+    ability, aok := g.abilities[ability_id]; assert(aok);
+
 }
 pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     buffer_io.buffer_reset(buf);
