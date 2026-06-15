@@ -64,6 +64,7 @@ unapply_camera :: proc {
 State :: struct {
     player_handle:      int,
     spref:              game.Entity,
+    pdirection:         raylib.Vector2, // direction player's looking at
     state_lock:         sync.Mutex,
     // server entities
     state_entities:     map[game.EntityHandle]game.Entity,
@@ -210,14 +211,13 @@ MAX_ZOOM_FACTOR :: 8
 MOUSE_DELTA :: 25
 send_user_ability :: proc(s: ^State, ability_index: u8) {
     fmt.println("User ability:", ability_index);
-    b := buffer_io.buffer_make(64)
-    buffer_io.buffer_write_u8(&b, networking.MSG_USER_MSG);
-    buffer_io.buffer_write_u32(&b, ID)
-    buffer_io.buffer_write_u8(&b, game.USR_MSG_ABILITY)
+    // init msg
+    b := networking.init_send_message(kind=.USER_MSG, user_id=ID)
+    // write
     buffer_io.buffer_write_u8(&b, ability_index)
-    n, nok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint)
-    assert(nok == .None)
-    buffer_io.buffer_destroy(&b)
+    // send
+    err := networking.send_message(socket=s.socket, endpoint=s.server_endpoint, b=&b)
+    assert(err ==.None)
 }
 handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
@@ -252,17 +252,14 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 sposx := (e.click.x - 0.5) * SCALED_SCREEN_WIDTH()
                 sposy := (e.click.y - 0.5) * SCALED_SCREEN_HEIGHT()
                 send_pos := raylib.Vector2{sposx, sposy} + game.rect_pos(p.body)
-                b := buffer_io.buffer_make(64)
-
-                // move msg
-                buffer_io.buffer_write_u8(&b, networking.MSG_USER_MSG);
-                buffer_io.buffer_write_u32(&b, ID)
-                buffer_io.buffer_write_u8(&b, game.USR_MSG_MOVE)
+                // init
+                b := networking.init_send_user_msg(.MOVE, ID)
+                // write
                 buffer_io.buffer_write_f32(&b, send_pos.x)
                 buffer_io.buffer_write_f32(&b, send_pos.y)
-                n, nok := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint)
-                assert(nok == .None)
-                buffer_io.buffer_destroy(&b)
+                // send
+                err := networking.send_message(s.socket, s.server_endpoint, &b)
+                assert(err == .None)
             }
         }
     }
@@ -283,15 +280,15 @@ init_game_con :: proc(s: ^State) -> i32 {
     // request_buf : [dynamic]byte;
     // append(&request_buf, networking.MSG_CONNECT);
     rbuf := buffer_io.buffer_make(1024)
-    buffer_io.buffer_write_u8(&rbuf, networking.MSG_CONNECT)
-    buffer_io.buffer_write_u32(&rbuf, ID)
+    b := networking.init_send_message(.CONNECT, ID)
+    buffer_io.buffer_write_u32(&b, ID)
     // resolve server endpoint
     server_endpoint, _ := net.resolve_ip4(networking.SERVER_ENDPOINT)
-    n, serr := net.send_udp(socket, rbuf.data[:rbuf.len], server_endpoint)
+    serr := networking.send_message(socket, server_endpoint, &b)
     if serr != .None {
         panic("err in sending connection request")
     }
-    fmt.printfln("Wrote %d bytes connection", n)
+    fmt.printfln("Wrote connection")
     // set endpoint
     s.socket = socket
     s.server_endpoint = server_endpoint
@@ -310,13 +307,12 @@ init_game_con :: proc(s: ^State) -> i32 {
     if string(recv_buf[:rn]) != "ack" {
         panic("not ack")
     }
-    buffer_io.buffer_reset(&rbuf)
-    buffer_io.buffer_write_u8(&rbuf, networking.MSG_GET_STATE)
-    n, serr = net.send_udp(socket, rbuf.data[:rbuf.len], server_endpoint)
+    b = networking.init_send_message(.GET_STATE, ID)
+    serr = networking.send_message(socket, server_endpoint, &b)
     if serr != .None {
         panic("err in sending connection request")
     }
-    fmt.printfln("Wrote %d bytes for request state", n)
+    fmt.printfln("Wrote request state")
     {
         recv_buf_b := buffer_io.buffer_make(1024)
         rn, endp, rerr := net.recv_udp(socket, recv_buf_b.data[:])
@@ -440,12 +436,13 @@ receiver_thread :: proc(s: ^State) {
         s.debug_last_packet_size = u32(n)
         sync.unlock(&s.state_lock)
         buf.len = n
-        msg, ok := buffer_io.buffer_read_u8(&buf)
+        _msg, ok := buffer_io.buffer_read_u8(&buf)
         if !ok {
             panic("Failed to read message kind")
         }
+        msg := networking.MsgKind(_msg)
         // fmt.printfln("got %d bytes (msg %d).", n, msg);
-        if msg == networking.MSG_GAME_DATA {
+        if msg == .GAME_DATA {
             sync.lock(&s.state_lock); {
                 user_specific := unpack_user_specific_data(&buf)
                 s.move_to    = user_specific.move_to
@@ -454,7 +451,7 @@ receiver_thread :: proc(s: ^State) {
             }; sync.unlock(&s.state_lock)
 
             unpack_game_data(s, &buf)
-        } else if msg == networking.MSG_PING_RESPOND {
+        } else if msg == .PING_RESPOND {
             pingid, ok := buffer_io.buffer_read_i32(&buf)
             assert(ok)
             last, pok := s.pings[u8(pingid)]
@@ -533,6 +530,9 @@ get_ts_src_for_wall :: proc(t:game.Tile, n: game.WallNeighbours) -> string {
 }
 
 main :: proc() {
+    flags : raylib.ConfigFlags
+    flags  += {.MSAA_4X_HINT}
+    // raylib.SetConfigFlags(flags);
     raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
     raylib.SetTargetFPS(60)
     tiles = raylib.LoadTexture("imgs/ts9.png")
@@ -567,8 +567,16 @@ main :: proc() {
     fmt.println("odin version:", ODIN_VERSION)
     // for sorted
     sorted := make([dynamic]SortedDrawElement)
+    prev_direction := raylib.Vector2{0,0}
     for !raylib.WindowShouldClose() && s.connected {
         dt := raylib.GetFrameTime()
+        rl_to_game(&events) // events
+        mp := raylib.GetMousePosition()
+        pdirection := mp - {SCREEN_WIDTH,SCREEN_HEIGHT}/2;
+        if pdirection != prev_direction {
+            s.pdirection = pdirection
+            
+        }
         // copy entities
         // clear_map(&s.current_entities)
         sync.lock(&s.state_lock)
@@ -608,7 +616,6 @@ main :: proc() {
         append(&s.logs, "Hello, World!!")
         append(&s.logs, "Debug logs:")
         slog(&s, "Last packet size: %d", s.debug_last_packet_size);
-        rl_to_game(&events)
         append(&s.logs, "events!")
         append(&s.logs, fmt.aprintf("ID: %d", ID))
         append(
@@ -752,19 +759,16 @@ main :: proc() {
         i += 1
         if i % 60 == 0 {
             i = 0
-            b := buffer_io.buffer_make(1024)
+            s.pings[ping_id] = time.now()
             // fmt.println("ping", ping_id, time.now())
-            buffer_io.buffer_write_u8(&b, networking.MSG_PING)
-            buffer_io.buffer_write_u32(&b, ID)
+            b := networking.init_send_message(.PING, ID)
             buffer_io.buffer_write_u32(&b, u32(ping_id))
 
-            s.pings[ping_id] = time.now()
-            n, err := net.send_udp(s.socket, b.data[:b.len], s.server_endpoint)
+            err := networking.send_message(s.socket, s.server_endpoint, &b)
             if err != .None {
                 fmt.println(err)
                 panic("Err in ping")
             }
-            buffer_io.buffer_destroy(&b)
             ping_id += 1
         }
         state_loop(&s)

@@ -9,8 +9,6 @@ import "vendor:raylib"
 import "project:common/buffer_io"
 ABILITIES_COUNT :: 6
 
-USR_MSG_MOVE:: 1;
-USR_MSG_ABILITY:: 2;
 
 SCREEN_SIZE :: raylib.Vector2{1200,900}
 EntityDeltaData :: u16 // each field, like position, status, texture and what not
