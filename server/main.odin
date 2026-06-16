@@ -13,7 +13,7 @@ import "project:common/buffer_io"
 MIN_ODIN :: "dev-2026-06"
 
 when ODIN_VERSION < MIN_ODIN {
-    #panic("Requires odin dev-2026-06")
+    // #panic("Requires odin dev-2026-06")
 }
 
 
@@ -29,6 +29,7 @@ Client :: struct {
     last_ping: time.Time,
     move_to: raylib.Vector2,
     move_origin:raylib.Vector2,
+    facing: raylib.Vector2,
     abilities: [ABILITIES_COUNT]game.EntityAbility,
     // reliability layer
     user_msg: u32, // increment when message successfull?
@@ -40,7 +41,7 @@ Ability :: struct {
     action: AbilityProc,
 }
 error :: distinct string;
-AbilityProc :: distinct proc(level: u32) -> error;
+AbilityProc :: distinct proc(g: ^Game, c: ^Client, id, level: u32, target: raylib.Vector2) -> error;
 @private
 Game :: struct {
     abilities: map[u32]Ability,
@@ -61,12 +62,22 @@ game_init :: proc() -> Game {
     g.entities = make(map[game.EntityHandle]Client);
     g.abilities = make(map[u32]Ability);
     g.abilities[1] = Ability{
-        action=proc(level: u32) -> error {
-            fmt.println("ability called with level:", level);
+        action=proc(g: ^Game, c: ^Client, id, level: u32, target:raylib.Vector2) -> error {
+            assert(c.entity.id != 0)
+            p := game.Projectile {
+                owner=c.entity.id,
+                origin=game.rect_pos(c.entity.body),
+                direction=target-game.rect_pos(c.entity.body),
+            };
+            fmt.println("ability called with level:", level, c);
+            game_spawn_projectile(g, p)
             return "ok"
         },
     };
     return g;
+}
+game_spawn_projectile :: proc(g: ^Game, p: game.Projectile) {
+    fmt.println("Projectile:", p);
 }
 
 init_server_socket :: proc(g: ^Game) {
@@ -102,7 +113,8 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         c.entity = game.Entity{
             texture=t,
             health=c.max_health,
-            body= raylib.Rectangle{0,0,32,32}
+            body= raylib.Rectangle{0,0,32,32},
+            id=id,
         };
         c.move_to = raylib.Vector2{0,0}
         c.move_origin = raylib.Vector2{0,0}
@@ -186,9 +198,21 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
             }
             case .ABILITY: {
                 index, ok := buffer_io.buffer_read_u8(buf);
+                x, xok := buffer_io.buffer_read_f32(buf); assert(xok);
+                y, yok := buffer_io.buffer_read_f32(buf); assert(yok);
                 fmt.println("Ability cast:", index)
-                cast_ability(g, id, index);
+                cast_ability(g, id, index, {x, y});
             }
+        case .DIRECTION: {
+            x, xok := buffer_io.buffer_read_f32(buf); assert(xok);
+            y, yok := buffer_io.buffer_read_f32(buf); assert(yok);
+            sync.lock(&g.entities_lock);
+            last, eok := g.entities[id]
+            assert(eok);
+            last.facing = {x,y};
+            g.entities[id] = last;
+            sync.unlock(&g.entities_lock);
+        }
         case: panic("Handle case");
         }
     } else {
@@ -207,7 +231,7 @@ add_projectile :: proc(g: ^Game, i: game.Projectile) {
     g.projectiles[g.projectiles_count] = p
     g.projectiles_count += 1;
 }
-cast_ability :: proc(g: ^Game, id: u32, index: u8) {
+cast_ability :: proc(g: ^Game, id: u32, index: u8, target: raylib.Vector2) {
     assert(index < ABILITIES_COUNT);
     sync.lock(&g.entities_lock)
     e, ok := g.entities[id]; assert(ok);
@@ -219,7 +243,7 @@ cast_ability :: proc(g: ^Game, id: u32, index: u8) {
     }
     ability_id := user_ability.ability_id;
     ability, aok := g.abilities[ability_id]; assert(aok);
-    ability.action(user_ability.level)
+    ability.action(g, &e, ability_id, user_ability.level, target)
     fmt.println("Abilitty:", abilities)
 }
 pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {

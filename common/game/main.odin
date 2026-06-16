@@ -282,6 +282,7 @@ Projectile :: struct {
     // what kind and which individually
     projectile_id : u32, // what projectile
     id: u32, // which projectile
+    owner: u32,
 }
 pack_projectile_spawn_data :: proc (p: Projectile, b: ^buffer_io.Buffer) {
     buffer_io.buffer_write_u32(b, p.id)

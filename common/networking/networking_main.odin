@@ -17,6 +17,7 @@ MsgKind :: enum u8 {
 UserMsgMoveKind :: enum u8 {
     MOVE,
     ABILITY,
+    DIRECTION,
 }
 // ADDR :: "172.31.138.162";
 // SERVER_ENDPOINT :: "172.31.138.162:8081";
