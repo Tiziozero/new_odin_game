@@ -12,12 +12,17 @@ MsgKind :: enum u8 {
     PING_RESPOND,
     GAME_DATA,
     USER_DATA,
+    GAME_MSG,
     USER_MSG,
 }
-UserMsgMoveKind :: enum u8 {
+UserMsgKind :: enum u8 {
     MOVE,
     ABILITY,
     DIRECTION,
+}
+GameMsgKind :: enum u8 {
+    SPAWN_PROJECTILE,
+    DESPAWN_PROJECTILE,
 }
 // ADDR :: "172.31.138.162";
 // SERVER_ENDPOINT :: "172.31.138.162:8081";
@@ -32,7 +37,16 @@ init_udp_socket :: proc(port := 0) -> (net.UDP_Socket, net.Network_Error) {
     }
     return socket, net.Create_Socket_Error.None;
 }
-init_send_user_msg :: proc(kind: UserMsgMoveKind,
+init_send_game_msg :: proc(kind: GameMsgKind) -> buffer_io.Buffer {
+
+    b := buffer_io.buffer_make(1024)
+
+    // user message
+    buffer_io.buffer_write_u8(&b, u8(MsgKind.GAME_MSG))
+    buffer_io.buffer_write_u8(&b, u8(kind))
+    return b
+}
+init_send_user_msg :: proc(kind: UserMsgKind,
     user_id: u32) -> buffer_io.Buffer {
 
     b := buffer_io.buffer_make(1024)

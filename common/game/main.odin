@@ -279,8 +279,7 @@ EntityAbility :: struct {
 Projectile :: struct {
     origin, direction, position: raylib.Vector2,
     active: bool, // is active
-    // what kind and which individually
-    projectile_id : u32, // what projectile
+    projectile_id : u32, // what kind projectile
     id: u32, // which projectile
     owner: u32,
 }

@@ -40,6 +40,9 @@ Ability :: struct {
     kind: game.AbilityKind,
     action: AbilityProc,
 }
+Event :: union {
+    game.Projectile, // projectile spawn
+}
 error :: distinct string;
 AbilityProc :: distinct proc(g: ^Game, c: ^Client, id, level: u32, target: raylib.Vector2) -> error;
 @private
@@ -48,6 +51,9 @@ Game :: struct {
     entities: map[game.EntityHandle]Client,
     projectiles: [PROJECTILES_COUNT]game.Projectile, // server_side_projectiles
     projectiles_count: u32,
+
+    event_lock: sync.Mutex,
+    loop_events: [dynamic]Event,
     entities_lock: sync.Mutex,
     socket: net.UDP_Socket,
     assets: game.AssetManger,
@@ -76,8 +82,27 @@ game_init :: proc() -> Game {
     };
     return g;
 }
-game_spawn_projectile :: proc(g: ^Game, p: game.Projectile) {
+global_projectile_id: u32 = 0
+game_spawn_projectile :: proc(g: ^Game, _p: game.Projectile) {
+    p := _p
+    p.id = global_projectile_id;
+    global_projectile_id += 1;
+    g.projectiles[g.projectiles_count] = p;
+    g.projectiles_count += 1;
+    sync.lock(&g.event_lock)
+    append(&g.loop_events, p);
+    sync.unlock(&g.event_lock)
     fmt.println("Projectile:", p);
+}
+
+write_projectile :: proc(g: ^Game, b: ^buffer_io.Buffer, p: game.Projectile) {
+    buffer_io.buffer_write(b, p.id)
+    buffer_io.buffer_write(b, p.projectile_id)
+    buffer_io.buffer_write(b, p.owner)
+    buffer_io.buffer_write(b, p.origin.x)
+    buffer_io.buffer_write(b, p.origin.y)
+    buffer_io.buffer_write(b, p.direction.x)
+    buffer_io.buffer_write(b, p.direction.y)
 }
 
 init_server_socket :: proc(g: ^Game) {
@@ -119,8 +144,9 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         c.move_to = raylib.Vector2{0,0}
         c.move_origin = raylib.Vector2{0,0}
         c.last_ping = time.now();
-        c.abilities[0].active = true
-        c.abilities[0].ability_id = 1
+        c.abilities[0].active = true;
+        c.abilities[0].ability_id = 1;
+        c.abilities[0].level = 1;
         // set 
         g.entities[game.EntityHandle(id)] = c;
         sync.mutex_unlock(&g.entities_lock);
@@ -172,14 +198,12 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         b := networking.init_send_message(.PING_RESPOND, ping_id)
         net.send_udp(g.socket, b.data[:b.len], endpoint);
         buffer_io.buffer_destroy(&b);
-    } else if msg == .USER_DATA {
-        panic("no");
     } else if msg == .USER_MSG {
         id, ok := buffer_io.buffer_read_u32(buf);
         assert(ok);
         kind, kok := buffer_io.buffer_read_u8(buf);
         assert(kok);
-        switch networking.UserMsgMoveKind(kind) {
+        switch networking.UserMsgKind(kind) {
             case .MOVE: {
                 new_x, new_y: f32;
                 new_x, ok = buffer_io.buffer_read_f32(buf);
@@ -355,6 +379,37 @@ snapshot_entry :: struct {
     k: game.EntityHandle,
     using c: Client,
 }
+p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
+    if p.x >= r.x && p.x <= r.x+r.width {
+        if p.y >= r.y && p.y <= r.y+r.height { return true }
+    }
+    return false
+}
+update_projectile :: proc(g: ^Game, p: game.Projectile, dt: f32) -> game.Projectile {
+    pspeed :f32 = 100;
+    // update position
+    prev_pos := p.position;
+    new_pos := prev_pos + p.direction*pspeed*dt;
+    for id, e in g.entities {
+        if p_in_rect(e.entity.body, new_pos) {
+            // hit
+        }
+    }
+    panic("impl")
+}
+update_game :: proc(g: ^Game, dt: f32) {
+    sync.mutex_lock(&g.entities_lock);
+    for k, e in g.entities {
+        c := e;
+           update_client(g, &c, dt);
+           g.entities[k] = c;
+    }
+    for p, id in g.projectiles[:g.projectiles_count] {
+        np := update_projectile(g, p, dt)
+        fmt.println(p)
+    }
+    sync.mutex_unlock(&g.entities_lock);
+}
 // user message:
 // [user specific data][game data]
 handle_sender_loop :: proc(g: ^Game) {
@@ -367,13 +422,7 @@ handle_sender_loop :: proc(g: ^Game) {
     i := 0;
     for {
         start := time.now()
-        sync.mutex_lock(&g.entities_lock);
-        for k, e in g.entities {
-            c := e;
-            update_client(g, &c, dt);
-            g.entities[k] = c;
-        }
-        sync.mutex_unlock(&g.entities_lock);
+        update_game(g, dt)
         // send data once every 3 updates
         if i < 3 {
             i+=1
