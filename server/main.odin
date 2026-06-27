@@ -141,6 +141,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
             body= raylib.Rectangle{0,0,32,32},
             id=id,
         };
+        c.last_entity = c.entity
         c.move_to = raylib.Vector2{0,0}
         c.move_origin = raylib.Vector2{0,0}
         c.last_ping = time.now();
@@ -385,17 +386,21 @@ p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
     }
     return false
 }
-update_projectile :: proc(g: ^Game, p: game.Projectile, dt: f32) -> game.Projectile {
+update_projectile :: proc(g: ^Game, last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
+    p := last_p
     pspeed :f32 = 100;
     // update position
-    prev_pos := p.position;
-    new_pos := prev_pos + p.direction*pspeed*dt;
+    prev_pos := last_p.position;
+    new_pos := prev_pos + last_p.direction*pspeed*dt;
     for id, e in g.entities {
         if p_in_rect(e.entity.body, new_pos) {
             // hit
+            fmt.println("hit");
+            return {}, true
         }
     }
-    panic("impl")
+    p.position = new_pos
+    return p, false
 }
 update_game :: proc(g: ^Game, dt: f32) {
     sync.mutex_lock(&g.entities_lock);
@@ -404,49 +409,50 @@ update_game :: proc(g: ^Game, dt: f32) {
            update_client(g, &c, dt);
            g.entities[k] = c;
     }
-    for p, id in g.projectiles[:g.projectiles_count] {
-        np := update_projectile(g, p, dt)
-        fmt.println(p)
+    i := u32(0)
+    for i < g.projectiles_count {
+        p := g.projectiles[i]
+
+        np, remove := update_projectile(g, p, dt)
+
+        if remove {
+            last := g.projectiles_count - 1
+            g.projectiles[i] = g.projectiles[last]
+            g.projectiles_count -= 1
+
+            // don't increment i here, because we need to
+            // process the projectile we just swapped in
+            continue
+        }
+
+        g.projectiles[i] = np
+        i += 1
     }
     sync.mutex_unlock(&g.entities_lock);
 }
-// user message:
-// [user specific data][game data]
-handle_sender_loop :: proc(g: ^Game) {
-    duration := time.Duration(10) * time.Millisecond
-    buf := buffer_io.buffer_make(1024); // make once
-    to_remove := make([dynamic]game.EntityHandle);
-    endpoints := make([dynamic]snapshot_entry);
-    dt : f32 = 0;
-    user_buf := buffer_io.buffer_make(1024) // make once
-    i := 0;
-    for {
-        start := time.now()
-        update_game(g, dt)
-        // send data once every 3 updates
-        if i < 3 {
-            i+=1
-        } else {
-            i = 0
+
+
+send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
+    endpoints: ^[dynamic]snapshot_entry, to_remove: ^[dynamic]game.EntityHandle) {
             //  write in loop before user specific data
             // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
-            pack_game_loop_data(g, &buf);
+            pack_game_loop_data(g, buf);
             sync.lock(&g.entities_lock);
             for k, e in g.entities {
-                append(&endpoints, snapshot_entry{k,e})
+                append(endpoints, snapshot_entry{k,e})
             }
             sync.unlock(&g.entities_lock);
             last := time.now()
             for k in endpoints {
                 elapsed := math.abs(time.diff(last, k.last_ping));
                          if elapsed > MAX_TIMEOUT {
-                             append(&to_remove, k.k)
+                             append(to_remove, k.k)
                          } else {
-                             buffer_io.buffer_reset(&user_buf)
-                             buffer_io.buffer_write_u8(&user_buf, u8(networking.MsgKind.GAME_DATA));
-                             pack_user_specific_data(k, &user_buf)
+                             buffer_io.buffer_reset(user_buf)
+                             buffer_io.buffer_write_u8(user_buf, u8(networking.MsgKind.GAME_DATA));
+                             pack_user_specific_data(k, user_buf)
                              // only write to buf.len, which is bytes of relevant data
-                             wrote, ok := buffer_io.buffer_write_bytes(&user_buf, buf.data[:buf.len])
+                             wrote, ok := buffer_io.buffer_write_bytes(user_buf, buf.data[:buf.len])
                              if ! ok {
                                  fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
                                  fmt.println(buf.len, buf.cap, len(buf.data))
@@ -468,13 +474,33 @@ handle_sender_loop :: proc(g: ^Game) {
                              fmt.println("Removing:", k, "from", len(g.entities), "entities");
                              delete_key(&g.entities,k);
                          }
-                         clear_dynamic_array(&to_remove);
+                         clear_dynamic_array(to_remove);
                          sync.mutex_unlock(&g.entities_lock);
                      }
                      // clear
-                     buffer_io.buffer_reset(&buf);
-                     clear_dynamic_array(&endpoints)
+                     buffer_io.buffer_reset(buf);
+                     clear_dynamic_array(endpoints)
 
+}
+// user message:
+// [user specific data][game data]
+handle_sender_loop :: proc(g: ^Game) {
+    duration := time.Duration(10) * time.Millisecond
+    buf := buffer_io.buffer_make(1024); // make once
+    to_remove := make([dynamic]game.EntityHandle);
+    endpoints := make([dynamic]snapshot_entry);
+    dt : f32 = 0;
+    user_buf := buffer_io.buffer_make(1024) // make once
+    i := 0;
+    for {
+        start := time.now()
+        update_game(g, dt)
+        // send data once every 3 updates
+        if i < 3 {
+            i+=1
+        } else {
+            i = 0
+            send_game_data(g, &buf, &user_buf, &endpoints, &to_remove)
         }
         elapsed := time.since(start)
         if elapsed < duration {
