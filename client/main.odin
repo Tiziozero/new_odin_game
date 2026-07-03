@@ -352,7 +352,6 @@ receiver_thread :: proc(s: ^State) {
     for s.connected {
         cur := time.now()
         d := time.diff(last, cur)
-        // fmt.println("Since last msg:", f32(d)/f32(time.Millisecond));
         last = cur
         n, endpoint, err := net.recv_udp(s.socket, buf.data[:])
         if err != .None {

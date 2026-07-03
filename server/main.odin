@@ -73,9 +73,10 @@ game_init :: proc() -> Game {
             p := game.Projectile {
                 owner=c.entity.id,
                 origin=game.rect_pos(c.entity.body),
+                range=200,
                 direction=target-game.rect_pos(c.entity.body),
             };
-            fmt.println("ability called with level:", level, c);
+            fmt.println("ability called with level:", level);
             game_spawn_projectile(g, p)
             return "ok"
         },
@@ -268,8 +269,8 @@ cast_ability :: proc(g: ^Game, id: u32, index: u8, target: raylib.Vector2) {
     }
     ability_id := user_ability.ability_id;
     ability, aok := g.abilities[ability_id]; assert(aok);
+    fmt.println("Abilitty:", ability)
     ability.action(g, &e, ability_id, user_ability.level, target)
-    fmt.println("Abilitty:", abilities)
 }
 pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     buffer_io.buffer_reset(buf);
@@ -387,11 +388,12 @@ p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
     return false
 }
 update_projectile :: proc(g: ^Game, last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
+    fmt.println("updating projectile");
     p := last_p
-    pspeed :f32 = 100;
+    pspeed :f32 = 100
     // update position
     prev_pos := last_p.position;
-    new_pos := prev_pos + last_p.direction*pspeed*dt;
+    new_pos := prev_pos + raylib.Vector2Normalize(last_p.direction)*pspeed*dt;
     for id, e in g.entities {
         if p_in_rect(e.entity.body, new_pos) {
             // hit
@@ -400,6 +402,11 @@ update_projectile :: proc(g: ^Game, last_p: game.Projectile, dt: f32) -> (game.P
         }
     }
     p.position = new_pos
+    if raylib.Vector2Distance(new_pos, last_p.origin) > p.range {
+        fmt.println(raylib.Vector2Distance(new_pos, last_p.origin))
+        fmt.println("removing projectile", p.range, new_pos, last_p.origin);
+        return p, true
+    }
     return p, false
 }
 update_game :: proc(g: ^Game, dt: f32) {

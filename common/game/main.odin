@@ -278,6 +278,7 @@ EntityAbility :: struct {
 // and clients predict movement.
 Projectile :: struct {
     origin, direction, position: raylib.Vector2,
+    range: f32,
     active: bool, // is active
     projectile_id : u32, // what kind projectile
     id: u32, // which projectile
