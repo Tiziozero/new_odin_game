@@ -40,8 +40,14 @@ Ability :: struct {
     kind: game.AbilityKind,
     action: AbilityProc,
 }
-Event :: union {
-    game.Projectile, // projectile spawn
+EventKind :: enum {
+    SpawnProjectile,
+    RemoveProjectile,
+    UserAbility,
+}
+Event :: struct {
+    kind: EventKind,
+    p: game.Projectile, // projectile spawn
 }
 error :: distinct string;
 AbilityProc :: distinct proc(g: ^Game, c: ^Client, id, level: u32, target: raylib.Vector2) -> error;
@@ -54,10 +60,14 @@ Game :: struct {
 
     event_lock: sync.Mutex,
     loop_events: [dynamic]Event,
+
     entities_lock: sync.Mutex,
     socket: net.UDP_Socket,
     assets: game.AssetManger,
     gmap: game.Map,
+}
+game_add_event :: proc(g: ^Game, e: Event) {
+    append(&g.loop_events, e);
 }
 
 game_init :: proc() -> Game {
@@ -91,7 +101,7 @@ game_spawn_projectile :: proc(g: ^Game, _p: game.Projectile) {
     g.projectiles[g.projectiles_count] = p;
     g.projectiles_count += 1;
     sync.lock(&g.event_lock)
-    append(&g.loop_events, p);
+    game_add_event(g, {kind=.SpawnProjectile, p=p})
     sync.unlock(&g.event_lock)
     fmt.println("Projectile:", p);
 }
@@ -154,24 +164,13 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         sync.mutex_unlock(&g.entities_lock);
         // send ok
         buffer_io.buffer_reset(buf);
-        b := strings.builder_make()
-        fmt.sbprint(&b, "ack");
-        nn, e := net.send_udp(g.socket, b.buf[:], endpoint);
-        strings.builder_destroy(&b)
+        b := networking.init_send_game_msg(.GAME_STATE)
+        n := pack_game(g, &b, all=true);
+
+        nn, e := net.send_udp(g.socket, b.data[:], endpoint);
+        buffer_io.buffer_destroy(&b)
     } else if msg == .GET_STATE {
-        b := buffer_io.buffer_make(1024);
-        sync.lock(&g.entities_lock)
-            fmt.println("Get game state:")
-        for k, c in g.entities { 
-            fmt.println(c.entity.id, c.entity.body)
-        }
-        sync.unlock(&g.entities_lock)
-        n := pack_game(g, &b, all = true);
-        nn, e := net.send_udp(g.socket, b.data[:n], endpoint);
-        if e != .None{
-            panic("Failed to send state to client?");
-        }
-        buffer_io.buffer_destroy(&b);
+        panic("impl");
     } else if msg == .PING {
         // fmt.print("ping ");
         id, ok := buffer_io.buffer_read_u32(buf);
@@ -277,6 +276,7 @@ pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     sync.mutex_lock(&g.entities_lock);
     for k, e in g.entities {
+        if all do fmt.println(k, e.entity)
         delta := game.get_entity_delta(e.last_entity, e.entity, all = all);
         if delta.delta > 0 {
             // fmt.println("Delta:", delta);
@@ -441,52 +441,52 @@ update_game :: proc(g: ^Game, dt: f32) {
 
 send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
     endpoints: ^[dynamic]snapshot_entry, to_remove: ^[dynamic]game.EntityHandle) {
-            //  write in loop before user specific data
-            // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
-            pack_game_loop_data(g, buf);
-            sync.lock(&g.entities_lock);
-            for k, e in g.entities {
-                append(endpoints, snapshot_entry{k,e})
+    //  write in loop before user specific data
+    // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
+    pack_game_loop_data(g, buf);
+    sync.lock(&g.entities_lock);
+    for k, e in g.entities {
+        append(endpoints, snapshot_entry{k,e})
+    }
+    sync.unlock(&g.entities_lock);
+    last := time.now()
+    for k in endpoints {
+        elapsed := math.abs(time.diff(last, k.last_ping));
+        if elapsed > MAX_TIMEOUT {
+            append(to_remove, k.k)
+        } else {
+            buffer_io.buffer_reset(user_buf)
+            buffer_io.buffer_write_u8(user_buf, u8(networking.MsgKind.GAME_DATA));
+            pack_user_specific_data(k, user_buf)
+            // only write to buf.len, which is bytes of relevant data
+            wrote, ok := buffer_io.buffer_write_bytes(user_buf, buf.data[:buf.len])
+            if ! ok {
+                fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
+                fmt.println(buf.len, buf.cap, len(buf.data))
             }
-            sync.unlock(&g.entities_lock);
-            last := time.now()
-            for k in endpoints {
-                elapsed := math.abs(time.diff(last, k.last_ping));
-                         if elapsed > MAX_TIMEOUT {
-                             append(to_remove, k.k)
-                         } else {
-                             buffer_io.buffer_reset(user_buf)
-                             buffer_io.buffer_write_u8(user_buf, u8(networking.MsgKind.GAME_DATA));
-                             pack_user_specific_data(k, user_buf)
-                             // only write to buf.len, which is bytes of relevant data
-                             wrote, ok := buffer_io.buffer_write_bytes(user_buf, buf.data[:buf.len])
-                             if ! ok {
-                                 fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
-                                 fmt.println(buf.len, buf.cap, len(buf.data))
-                             }
-                             assert(ok);
-                             assert(wrote == buf.len)
-                             sn, err := net.send_udp(g.socket, user_buf.data[:user_buf.len], k.endpoint);
-                             if err != .None {
-                                 panic("err in sending to client");
-                             }
-                             if sn != user_buf.len {
-                                 panic("Didn't send all bytes");
-                             }
-                         }
-                     }
-                     if len(to_remove) > 0 {
-                         sync.mutex_lock(&g.entities_lock);
-                         for k in to_remove {
-                             fmt.println("Removing:", k, "from", len(g.entities), "entities");
-                             delete_key(&g.entities,k);
-                         }
-                         clear_dynamic_array(to_remove);
-                         sync.mutex_unlock(&g.entities_lock);
-                     }
-                     // clear
-                     buffer_io.buffer_reset(buf);
-                     clear_dynamic_array(endpoints)
+            assert(ok);
+            assert(wrote == buf.len)
+            sn, err := net.send_udp(g.socket, user_buf.data[:user_buf.len], k.endpoint);
+            if err != .None {
+                panic("err in sending to client");
+            }
+            if sn != user_buf.len {
+                panic("Didn't send all bytes");
+            }
+        }
+    }
+    if len(to_remove) > 0 {
+        sync.mutex_lock(&g.entities_lock);
+        for k in to_remove {
+            fmt.println("Removing:", k, "from", len(g.entities), "entities");
+            delete_key(&g.entities,k);
+        }
+        clear_dynamic_array(to_remove);
+        sync.mutex_unlock(&g.entities_lock);
+    }
+    // clear
+    buffer_io.buffer_reset(buf);
+    clear_dynamic_array(endpoints)
 
 }
 // user message:

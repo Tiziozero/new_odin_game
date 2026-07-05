@@ -346,6 +346,50 @@ unpack_game_data :: proc(s: ^State, buf: ^buffer_io.Buffer) {
         sync.unlock(&s.state_lock)
     }
 }
+handle_server_msg :: proc(s: ^State, buf: ^buffer_io.Buffer) {
+    _msg, ok := buffer_io.buffer_read_u8(buf)
+    if !ok {
+        panic("Failed to read message kind")
+    }
+    msg := networking.MsgKind(_msg)
+    // fmt.printfln("got %d bytes (msg %d).", n, msg);
+    #partial switch msg {
+    case .GAME_MSG: {
+        kind, ok := buffer_io.buffer_read_u8(buf); assert(ok);
+        #partial switch cast(networking.GameMsgKind)kind {
+        case: panic("impl");
+        }
+    }
+    case .GAME_DATA: {
+        sync.lock(&s.state_lock); {
+            user_specific := unpack_user_specific_data(buf)
+            s.move_to    = user_specific.move_to
+            s.abilities  = user_specific.abilities
+            s.energy     = user_specific.energy
+        }; sync.unlock(&s.state_lock)
+
+        unpack_game_data(s, buf)
+    } 
+    case .PING_RESPOND: {
+        pingid, ok := buffer_io.buffer_read_i32(buf)
+        assert(ok)
+        last, pok := s.pings[u8(pingid)]
+        if !pok {
+            fmt.println(pingid)
+            panic("Notnok for pihg id")
+        }
+        delete_key(&s.pings, u8(pingid))
+        now := time.now()
+        diff := time.diff(now, last)
+        s.ping = f32(diff) / f32(time.Millisecond)
+
+    }
+    case: {
+        fmt.println(msg)
+        panic("Unknown message")
+    }
+    }
+}
 receiver_thread :: proc(s: ^State) {
     buf := buffer_io.buffer_make(1024)
     last := time.now()
@@ -362,42 +406,17 @@ receiver_thread :: proc(s: ^State) {
             fmt.println(endpoint)
             panic("received msg from not server")
         }
+        // set buffer size
+        buf.len = n
+        // update last packet
         sync.lock(&s.state_lock)
         s.debug_last_packet_size = u32(n)
         sync.unlock(&s.state_lock)
-        buf.len = n
-        _msg, ok := buffer_io.buffer_read_u8(&buf)
-        if !ok {
-            panic("Failed to read message kind")
-        }
-        msg := networking.MsgKind(_msg)
-        // fmt.printfln("got %d bytes (msg %d).", n, msg);
-        if msg == .GAME_DATA {
-            sync.lock(&s.state_lock); {
-                user_specific := unpack_user_specific_data(&buf)
-                s.move_to    = user_specific.move_to
-                s.abilities  = user_specific.abilities
-                s.energy     = user_specific.energy
-            }; sync.unlock(&s.state_lock)
 
-            unpack_game_data(s, &buf)
-        } else if msg == .PING_RESPOND {
-            pingid, ok := buffer_io.buffer_read_i32(&buf)
-            assert(ok)
-            last, pok := s.pings[u8(pingid)]
-            if !pok {
-                fmt.println(pingid)
-                panic("Notnok for pihg id")
-            }
-            delete_key(&s.pings, u8(pingid))
-            now := time.now()
-            diff := time.diff(now, last)
-            s.ping = f32(diff) / f32(time.Millisecond)
-        } else {
-            fmt.println(msg)
-            panic("Unknown message")
-        }
+        // hande
+        handle_server_msg(s, &buf);
 
+        // reset
         buffer_io.buffer_reset(&buf)
     }
     panic("Not connected anymore")
@@ -468,9 +487,13 @@ main :: proc() {
     tiles = raylib.LoadTexture("imgs/ts9.png")
     s := State{}
     s.debug = true
-    s.assets = game.load_assets("imgs.json", load =false)
-    if init_game_con(&s) != 0 {
+    s.assets = game.load_assets("imgs.json", load=true)
+    r :=init_game_con(&s) 
+    if r != 0 {
         return
+    } else if r == 0 {
+        fmt.println("connected");
+        panic("impl")
     }
 
     t_receiver := thread.create_and_start_with_data(data = &s, fn = thread_receiver_fn)
