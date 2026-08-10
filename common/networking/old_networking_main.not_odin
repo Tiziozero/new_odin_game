@@ -1,5 +1,6 @@
 package networking
 
+import "vendor:raylib"
 import "core:fmt"
 import "core:net";
 import "project:common/buffer_io"
@@ -22,6 +23,37 @@ GameMsgKind :: enum u8 {
     SPAWN_PROJECTILE,
     REMOVE_PROJECTILE,
     GAME_STATE,
+}
+UserData :: struct {
+    energy: f32,
+    abilities: [ABILITIES_COUNT]PlayerAbility,
+    move_to: raylib.Vector2,
+}
+Msg :: struct {
+    kind: MsgKind,
+    move: struct { x, y: f32 },
+    get_state: struct {},
+    ping: u32, // ping id for client side ping
+    ping_response: u32, // from server with ping id
+    game_data: struct {
+    },
+    user_data: struct {
+    },
+    game_msg: struct {
+        kind: GameMsgKind,
+        spawn_projectile: struct {
+        },
+        remove_projectile: struct {
+        },
+        game_state: struct {
+        },
+    },
+    user_msg: struct {
+        kind: UserMsgKind,
+        move: struct { x, y: f32 },
+        ability: struct {},
+        direction: struct { x, y: f32 },
+    }
 }
 // ADDR :: "172.31.138.162";
 // SERVER_ENDPOINT :: "172.31.138.162:8081";

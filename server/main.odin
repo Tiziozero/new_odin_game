@@ -3,19 +3,16 @@ package main
 import "core:math/rand"
 import "core:sync"
 import "core:math"
-import "core:strings"
 import "vendor:raylib"
 import "core:net"
 import "core:fmt"
 import "project:common/game"
-import "project:common/networking"
 import "project:common/buffer_io"
 MIN_ODIN :: "dev-2026-06"
 
 when ODIN_VERSION < MIN_ODIN {
     // #panic("Requires odin dev-2026-06")
 }
-
 
 @private
 Client :: struct {
@@ -49,7 +46,7 @@ Event :: struct {
     kind: EventKind,
     p: game.Projectile, // projectile spawn
 }
-error :: distinct string;
+error :: distinct struct { error: string, ok: bool };
 AbilityProc :: distinct proc(g: ^Game, c: ^Client, id, level: u32, target: raylib.Vector2) -> error;
 @private
 Game :: struct {
@@ -88,7 +85,7 @@ game_init :: proc() -> Game {
             };
             fmt.println("ability called with level:", level);
             game_spawn_projectile(g, p)
-            return "ok"
+            return {"", true }
         },
     };
     return g;
@@ -117,7 +114,7 @@ write_projectile :: proc(g: ^Game, b: ^buffer_io.Buffer, p: game.Projectile) {
 }
 
 init_server_socket :: proc(g: ^Game) {
-    s, _ := networking.init_udp_socket(port=8081);
+    s, _ := game.init_udp_socket(port=8081);
     g.socket = s;
 }
 game_handle_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
@@ -126,17 +123,10 @@ import "core:time"
 import "core:thread"
 
 handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint) {
-    _msg, ok := buffer_io.buffer_read_u8(buf);
-    if !ok {
-        panic("failed to read u8 from user msg buffer");
-    }
-    msg := networking.MsgKind(_msg)
-    if msg == .CONNECT {
+    msg := game.unpack_client_message(buf)
+    if msg.kind == .CONNECT {
         fmt.println("Connect");
-        id, ok := buffer_io.buffer_read_u32(buf);
-        if !ok {
-            panic("Failed to read u32, user id for connect");
-        }
+        id := msg.connect.user_id
         fmt.printfln("\taccess token: %d", id);
         sync.mutex_lock(&g.entities_lock);
         // in future get proper shi
@@ -164,25 +154,12 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         sync.mutex_unlock(&g.entities_lock);
         // send ok
         buffer_io.buffer_reset(buf);
-        b := networking.init_send_game_msg(.GAME_STATE)
-        n := pack_game(g, &b, all=true);
-
-        nn, e := net.send_udp(g.socket, b.data[:], endpoint);
-        buffer_io.buffer_destroy(&b)
-    } else if msg == .GET_STATE {
-        panic("impl");
-    } else if msg == .PING {
+        // pack game data
+        panic("impl like look");
+    } else if msg.kind == .PING {
         // fmt.print("ping ");
-        id, ok := buffer_io.buffer_read_u32(buf);
-        if !ok {
-            panic("Failed to read u32, user id for connect");
-        }
-        ping_id, pok := buffer_io.buffer_read_u32(buf);
-        if !pok {
-            panic("Failed to read u32, ping id for connect");
-        }
-        
-        // fmt.println("from", id, "pinng id", ping_id);
+        id := msg.ping.user_id
+        ping_id := msg.ping.id
 
         // update last ping
         sync.mutex_lock(&g.entities_lock);
@@ -196,16 +173,15 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         sync.mutex_unlock(&g.entities_lock);
 
         // write confirmation
-        b := networking.init_send_message(.PING_RESPOND, ping_id)
-        net.send_udp(g.socket, b.data[:b.len], endpoint);
-        buffer_io.buffer_destroy(&b);
-    } else if msg == .USER_MSG {
-        id, ok := buffer_io.buffer_read_u32(buf);
-        assert(ok);
-        kind, kok := buffer_io.buffer_read_u8(buf);
-        assert(kok);
-        switch networking.UserMsgKind(kind) {
+        b := game.init_send_message()
+        game.pack_server_message(&b, {kind=.PING_RESPOND, ping_response=ping_id})
+        game.send_message(g.socket, endpoint, &b);
+    } else if msg.kind == .USER_MSG {
+        id := msg.user_msg.user_id;
+        kind := msg.user_msg.kind
+        switch kind {
             case .MOVE: {
+                ok: bool
                 new_x, new_y: f32;
                 new_x, ok = buffer_io.buffer_read_f32(buf);
                 assert(ok);
@@ -442,7 +418,7 @@ update_game :: proc(g: ^Game, dt: f32) {
 send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
     endpoints: ^[dynamic]snapshot_entry, to_remove: ^[dynamic]game.EntityHandle) {
     //  write in loop before user specific data
-    // buffer_io.buffer_write_u8(&buf, networking.MSG_GAME_DATA);
+    // buffer_io.buffer_write_u8(&buf, game.MSG_GAME_DATA);
     pack_game_loop_data(g, buf);
     sync.lock(&g.entities_lock);
     for k, e in g.entities {
@@ -456,7 +432,7 @@ send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
             append(to_remove, k.k)
         } else {
             buffer_io.buffer_reset(user_buf)
-            buffer_io.buffer_write_u8(user_buf, u8(networking.MsgKind.GAME_DATA));
+            buffer_io.buffer_write_u8(user_buf, u8(game.MsgKind.GAME_DATA));
             pack_user_specific_data(k, user_buf)
             // only write to buf.len, which is bytes of relevant data
             wrote, ok := buffer_io.buffer_write_bytes(user_buf, buf.data[:buf.len])

@@ -16,8 +16,7 @@ import "core:thread"
 import "core:time"
 import "project:common/buffer_io"
 import "project:common/game"
-import "project:common/networking"
-import raylib "vendor:raylib"
+import "vendor:raylib"
 ID: u32 = 0
 apply_camera_v :: proc(camera: raylib.Rectangle, v: raylib.Vector2) -> raylib.Vector2 {
     return v - game.rect_pos(camera)
@@ -83,13 +82,14 @@ State :: struct {
     pings:              map[u8]time.Time,
     draws:              [dynamic]DrawCommand,
     gmap:               game.Map,
-    debug:       bool,
+    debug:              bool,
     move_to:            raylib.Vector2,
-    abilities:          [ABILITIES_COUNT]PlayerAbility,
+    abilities:          [ABILITIES_COUNT]PlayerAbility, // client side abilities
     energy:             f32,
     debug_last_packet_size: u32,
 }
 PlayerAbility :: struct {
+    active: u8,
     ability_id: u32,
     level: u32,
     cooldown: f32,
@@ -211,13 +211,15 @@ MOUSE_DELTA :: 25
 send_user_ability :: proc(s: ^State, ability_index: u8) {
     fmt.println("User ability:", ability_index);
     // init msg
-    b := networking.init_send_user_msg(kind=.ABILITY, user_id=ID)
-    // write
-    buffer_io.buffer_write_u8(&b, ability_index)
-    target := unapply_camera(s, raylib.GetMousePosition())
-    // direction
-    buffer_io.buffer_write_f32(&b, target.x)
-    buffer_io.buffer_write_f32(&b, target.y)
+    b := networking.init_send_message()
+    game.pack_client_message(&b, {kind=.USER_MSG, user_msg={
+                kind=.ABILITY,
+                ability={
+                    user_ability_index=ability_index,
+                    direction=s.pdirection,
+                }
+            }
+        })
     // send
     err := networking.send_message(socket=s.socket, endpoint=s.server_endpoint, b=&b)
     assert(err ==.None)
@@ -256,10 +258,11 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 sposy := (e.click.y - 0.5) * SCALED_SCREEN_HEIGHT()
                 send_pos := raylib.Vector2{sposx, sposy} + game.rect_pos(p.body)
                 // init
-                b := networking.init_send_user_msg(.MOVE, ID)
+                b := networking.init_send_message()
                 // write
-                buffer_io.buffer_write_f32(&b, send_pos.x)
-                buffer_io.buffer_write_f32(&b, send_pos.y)
+                game.pack_client_message(&b, {kind=.USER_MSG, user_msg={
+                    user_id=ID, kind=.MOVE, move=send_pos
+                }})
                 // send
                 err := networking.send_message(s.socket, s.server_endpoint, &b)
                 assert(err == .None)
@@ -275,11 +278,6 @@ state_loop :: proc(s: ^State) {
     clear(&s.logs)
 }
 
-user_specific_data :: struct {
-    energy: f32,
-    abilities: [ABILITIES_COUNT]PlayerAbility,
-    move_to: raylib.Vector2,
-}
 ABILITIES_COUNT :: game.ABILITIES_COUNT
 unpack_user_specific_data :: proc(b: ^buffer_io.Buffer) -> user_specific_data {
     u := user_specific_data{};
@@ -529,10 +527,8 @@ main :: proc() {
         if pdirection != prev_direction {
             s.pdirection = pdirection
             // send
-            b := networking.init_send_user_msg(.DIRECTION, ID);
-            buffer_io.buffer_write_f32(&b, pdirection.x)
-            buffer_io.buffer_write_f32(&b, pdirection.y)
-            networking.send_message(s.socket, s.server_endpoint, &b)
+            // b := networking.init_send_message();
+            // networking.send_message(s.socket, s.server_endpoint, &b)
         }
         // copy entities
         // clear_map(&s.current_entities)
@@ -718,9 +714,8 @@ main :: proc() {
             i = 0
             s.pings[ping_id] = time.now()
             // fmt.println("ping", ping_id, time.now())
-            b := networking.init_send_message(.PING, ID)
-            buffer_io.buffer_write_u32(&b, u32(ping_id))
-
+            b := networking.init_send_message()
+            game.pack_client_message(&b, {kind=.PING, ping={user_id=ID, id=u32(ping_id)}});
             err := networking.send_message(s.socket, s.server_endpoint, &b)
             if err != .None {
                 fmt.println(err)
