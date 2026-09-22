@@ -484,23 +484,24 @@ get_ts_src_for_wall :: proc(t:game.Tile, n: game.WallNeighbours) -> string {
 }
 
 main :: proc() {
-    flags : raylib.ConfigFlags
-    flags  += {.MSAA_4X_HINT}
-    // raylib.SetConfigFlags(flags);
-    raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
-    raylib.SetTargetFPS(60)
-    tiles = raylib.LoadTexture("imgs/ts9.png")
     s := State{}
+    // raylib.SetConfigFlags(flags);
+    tiles = raylib.LoadTexture("imgs/ts9.png")
     s.debug = true
     s.assets = game.load_assets("imgs.json", load=true)
+
     r :=init_game_con(&s) 
     if r != 0 {
         return
     } else if r == 0 {
         fmt.println("connected");
-        panic("impl")
+        // return;
     }
-
+    flags : raylib.ConfigFlags
+    flags  += {.MSAA_4X_HINT}
+    raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
+    defer raylib.CloseWindow();
+    raylib.SetTargetFPS(60)
     t_receiver := thread.create_and_start_with_data(data = &s, fn = thread_receiver_fn)
     s.pings = make(map[u8]time.Time)
 

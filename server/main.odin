@@ -124,7 +124,8 @@ import "core:time"
 import "core:thread"
 
 handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint) {
-    msg := game.unpack_client_message(buf)
+    fmt.println("BUFFER:", buf.data[:buf.len])
+    msg := game.unpack_server_message(buf)
     if msg.kind == .CONNECT {
         fmt.println("Connect");
         id := msg.connect.user_id
@@ -157,16 +158,22 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
 
         sync.mutex_unlock(&g.entities_lock);
 
-        // send initial state
-        buffer_io.buffer_reset(buf);
+        // FIXED: use a fresh, one-shot buffer for this reply instead of the
+        // receiver loop's shared `buf`. game.send_message DESTROYS whatever
+        // buffer it's given after sending. The old code passed the receiver
+        // loop's own persistent `buf` (the one handle_receiver_loop reuses
+        // every iteration for net.recv_udp) straight into send_message,
+        // which freed its backing array. The next call to
+        // net.recv_udp(g.socket, buf.data[:]) then read into a nil/
+        // zero-length slice, returned n == 0, and triggered
+        // `panic("Received 0 bytes?")` — this is exactly the bug reported.
+        b := game.init_send_message()
+        buffer_io.buffer_write_u8(&b, u8(game.MsgKind.GAME_DATA));
+        pack_game(g, &b, true);
+        game.send_message(g.socket, endpoint, &b); // frees `b`; shared `buf` is untouched
 
-        buffer_io.buffer_write_u8(buf, u8(game.MsgKind.GAME_DATA));
-        buffer_io.buffer_write_u8(buf, 1); // no_send
-        pack_game(g, buf, true);
-
-        // send ok
-        game.send_message(g.socket, endpoint, buf);
     } else if msg.kind == .START_GAME {
+        fmt.println("START GAME");
         id := msg.start_game.user_id;
         sync.lock(&g.entities_lock);
         c, ok := g.entities[id];
@@ -193,7 +200,8 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         g.entities[game.EntityHandle(id)] = last;
         sync.mutex_unlock(&g.entities_lock);
 
-        // write confirmation
+        // write confirmation — already uses its own one-shot buffer, so this
+        // was never affected by the bug.
         b := game.init_send_message()
         game.pack_server_message(&b, {kind=.PING_RESPOND, ping_response=ping_id})
         game.send_message(g.socket, endpoint, &b);
@@ -269,7 +277,7 @@ cast_ability :: proc(g: ^Game, id: u32, index: u8, target: raylib.Vector2) {
     ability.action(g, &e, ability_id, user_ability.level, target)
 }
 pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
-    buffer_io.buffer_reset(buf);
+    // buffer_io.buffer_reset(buf);
     buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
     sync.mutex_lock(&g.entities_lock);
     for k, e in g.entities {
@@ -300,6 +308,9 @@ handle_receiver_loop :: proc(g: ^Game) {
             }
             fmt.println(err)
             panic("recevied error");
+        }
+        if n == 0 {
+            panic("Received 0 bytes?");
         }
         buf.len = n;
         handle_user_msg(g, &buf, endpoint);

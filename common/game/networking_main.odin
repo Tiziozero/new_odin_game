@@ -108,12 +108,61 @@ init_send_message :: proc() -> buffer_io.Buffer {
     b := buffer_io.buffer_make(1024)
     return b
 }
-send_message :: proc(socket: net.UDP_Socket, endpoint: net.Endpoint,
+send_message_3 :: proc(socket: net.UDP_Socket, endpoint: net.Endpoint,
     b: ^buffer_io.Buffer) -> net.UDP_Send_Error {
-    n, err := net.send(socket, b.data[:buffer_io.buffer_written(b)], endpoint)
+    if b.len == 0 { panic("can't sent 0 bytes."); }
+    n, err := net.send(socket, b.data[:buffer_io.buffer_written(b)], endpoint);
     assert(n == buffer_io.buffer_written(b));
+    fmt.println("sent", n, "bytes.");
     buffer_io.buffer_destroy(b)
     return err;
+}
+// send_message OWNS the buffer it's given: it sends, then destroys it.
+// Callers must therefore pass a buffer they don't need afterward — never
+// a long-lived/reused buffer (e.g. the receiver loop's recv buffer).
+// beacuse of no destroy
+send_message:: proc(socket: net.UDP_Socket, endpoint: net.Endpoint,
+    b: ^buffer_io.Buffer) -> net.UDP_Send_Error {
+
+    written := buffer_io.buffer_written(b)
+
+    fmt.println(
+        "SEND:",
+        "len =", b.len,
+        "pos =", b.pos,
+        "written =", written,
+        "cap =", b.cap,
+    )
+
+    if written == 0 {
+        fmt.println("DATA:", b.data[:b.len])
+        panic("attempted to send 0 bytes")
+    }
+
+    n, err := net.send(socket, b.data[:written], endpoint)
+
+    fmt.println("sent", n, "bytes")
+    assert(n == written)
+    buffer_io.buffer_destroy(b)
+
+    return err
+}
+send_message_2 :: proc(
+    socket: net.UDP_Socket,
+    endpoint: net.Endpoint,
+    b: ^buffer_io.Buffer,
+) -> net.UDP_Send_Error {
+    written := buffer_io.buffer_written(b)
+
+    fmt.println("SEND:", written)
+    fmt.println("DATA:", b.data[:written])
+
+    n, err := net.send(socket, b.data[:written], endpoint)
+
+    buffer_io.buffer_destroy(b)
+    fmt.println("sent", n, "bytes")
+
+    return err
 }
 
 
@@ -304,10 +353,7 @@ pack_client_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
         buffer_io.buffer_write_u32(buf, msg.start_game.user_id)
 
     case .CONNECT:
-        buffer_io.buffer_write_u32(
-            buf,
-            msg.connect.user_id,
-        )
+        buffer_io.buffer_write_u32(buf, msg.connect.user_id,)
 
     case .GET_STATE:
         // Currently no payload.
