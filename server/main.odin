@@ -158,15 +158,9 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
 
         sync.mutex_unlock(&g.entities_lock);
 
-        // FIXED: use a fresh, one-shot buffer for this reply instead of the
-        // receiver loop's shared `buf`. game.send_message DESTROYS whatever
-        // buffer it's given after sending. The old code passed the receiver
-        // loop's own persistent `buf` (the one handle_receiver_loop reuses
-        // every iteration for net.recv_udp) straight into send_message,
-        // which freed its backing array. The next call to
-        // net.recv_udp(g.socket, buf.data[:]) then read into a nil/
-        // zero-length slice, returned n == 0, and triggered
-        // `panic("Received 0 bytes?")` — this is exactly the bug reported.
+        // Uses a fresh, one-shot buffer for this reply instead of the
+        // receiver loop's shared `buf`, since game.send_message destroys
+        // whatever buffer it's given.
         b := game.init_send_message()
         buffer_io.buffer_write_u8(&b, u8(game.MsgKind.GAME_DATA));
         pack_game(g, &b, true);
@@ -200,8 +194,7 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         g.entities[game.EntityHandle(id)] = last;
         sync.mutex_unlock(&g.entities_lock);
 
-        // write confirmation — already uses its own one-shot buffer, so this
-        // was never affected by the bug.
+        // write confirmation — already uses its own one-shot buffer.
         b := game.init_send_message()
         game.pack_server_message(&b, {kind=.PING_RESPOND, ping_response=ping_id})
         game.send_message(g.socket, endpoint, &b);
@@ -210,36 +203,38 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         kind := msg.user_msg.kind
         switch kind {
             case .MOVE: {
-                ok: bool
-                new_x, new_y: f32;
-                new_x, ok = buffer_io.buffer_read_f32(buf);
-                assert(ok);
-                new_y, ok = buffer_io.buffer_read_f32(buf);
-                assert(ok);
+                // FIXED: use the values unpack_server_message already parsed
+                // into msg.user_msg.move, instead of re-reading from `buf`.
+                // unpack_server_message's USER_MSG/.MOVE case already
+                // consumed these two f32s and advanced buf.pos past them,
+                // so calling buffer_io.buffer_read_f32(buf) here a second
+                // time read whatever came after (or past buf.len), tripping
+                // the assert(ok) or silently corrupting move_to with junk.
                 sync.lock(&g.entities_lock);
                 last, eok := g.entities[id]
                 assert(eok);
-                last.move_to.x = new_x
-                last.move_to.y = new_y
+                last.move_to.x = msg.user_msg.move.x
+                last.move_to.y = msg.user_msg.move.y
                 last.move_origin.x = last.entity.body.x
                 last.move_origin.y = last.entity.body.y
                 g.entities[id] = last;
                 sync.unlock(&g.entities_lock);
             }
             case .ABILITY: {
-                index, ok := buffer_io.buffer_read_u8(buf);
-                x, xok := buffer_io.buffer_read_f32(buf); assert(xok);
-                y, yok := buffer_io.buffer_read_f32(buf); assert(yok);
+                // FIXED: same issue — use msg.user_msg.ability, already
+                // unpacked (index + direction), instead of re-reading buf.
+                index := msg.user_msg.ability.user_ability_index
+                target := msg.user_msg.ability.direction
                 fmt.println("Ability cast:", index)
-                cast_ability(g, id, index, {x, y});
+                cast_ability(g, id, index, target);
             }
         case .DIRECTION: {
-            x, xok := buffer_io.buffer_read_f32(buf); assert(xok);
-            y, yok := buffer_io.buffer_read_f32(buf); assert(yok);
+            // FIXED: same issue — use msg.user_msg.direction, already
+            // unpacked, instead of re-reading buf.
             sync.lock(&g.entities_lock);
             last, eok := g.entities[id]
             assert(eok);
-            last.facing = {x,y};
+            last.facing = msg.user_msg.direction;
             g.entities[id] = last;
             sync.unlock(&g.entities_lock);
         }

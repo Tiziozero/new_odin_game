@@ -1,3 +1,4 @@
+// client.odin
 package main
 
 SCREEN_FACTOR := f32(2.0)
@@ -245,6 +246,7 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 send_user_ability(s, 3);
             case .T:
                 s.debug = !s.debug
+                fmt.println("TOGGLE DEBUG")
             case .K:
                 bool_snap = !bool_snap
             case:
@@ -484,6 +486,11 @@ get_ts_src_for_wall :: proc(t:game.Tile, n: game.WallNeighbours) -> string {
 }
 
 main :: proc() {
+    flags : raylib.ConfigFlags
+    flags  += {.MSAA_4X_HINT}
+    raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
+    defer raylib.CloseWindow();
+    raylib.SetTargetFPS(60)
     s := State{}
     // raylib.SetConfigFlags(flags);
     tiles = raylib.LoadTexture("imgs/ts9.png")
@@ -497,11 +504,6 @@ main :: proc() {
         fmt.println("connected");
         // return;
     }
-    flags : raylib.ConfigFlags
-    flags  += {.MSAA_4X_HINT}
-    raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
-    defer raylib.CloseWindow();
-    raylib.SetTargetFPS(60)
     t_receiver := thread.create_and_start_with_data(data = &s, fn = thread_receiver_fn)
     s.pings = make(map[u8]time.Time)
 
