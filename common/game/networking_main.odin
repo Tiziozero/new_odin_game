@@ -5,7 +5,9 @@ import "core:fmt"
 import "core:net";
 import "project:common/buffer_io"
 MsgKind :: enum u8 {
+    Invalid,
     CONNECT,
+    START_GAME,
     GET_STATE,
     PING,
     PING_RESPOND,
@@ -77,18 +79,16 @@ Msg :: struct {
         user_id: u32,
         kind: UserMsgKind,
 
-        move: struct {
-            x, y: f32,
-        },
-
+        move: raylib.Vector2,
         ability: struct {
             user_ability_index: u8,
             direction: raylib.Vector2,
         },
 
-        direction: struct {
-            x, y: f32,
-        },
+        direction: raylib.Vector2,
+    },
+    start_game: struct {
+        user_id: u32,
     },
 }
 // ADDR :: "172.31.138.162";
@@ -126,6 +126,10 @@ unpack_server_message :: proc(buf: ^buffer_io.Buffer) -> Msg {
     msg.kind = MsgKind(raw_kind)
 
     switch msg.kind {
+    case .Invalid: panic("invalid game message.")
+    case .START_GAME:
+        msg.start_game.user_id, ok = buffer_io.buffer_read_u32(buf)
+        assert(ok)
 
     case .CONNECT:
         msg.connect.user_id, ok = buffer_io.buffer_read_u32(buf)
@@ -192,6 +196,7 @@ unpack_server_message :: proc(buf: ^buffer_io.Buffer) -> Msg {
         panic("Server received a server message")
 
     case:
+        fmt.println(msg.kind)
         panic("Invalid MsgKind")
     }
 
@@ -203,6 +208,9 @@ pack_server_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
     buffer_io.buffer_write_u8(buf, u8(msg.kind))
 
     switch msg.kind {
+    case .Invalid: panic("invalid game message.")
+    case .START_GAME:
+        buffer_io.buffer_write_u32( buf, msg.start_game.user_id,)
 
     case .GAME_DATA:
         buffer_io.buffer_write_f32(buf, msg.game_data.user_data.energy)
@@ -281,6 +289,7 @@ pack_server_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
         panic("Server attempted to send a client message")
 
     case:
+        fmt.println(msg.kind)
         panic("Invalid MsgKind")
     }
 }
@@ -290,6 +299,9 @@ pack_client_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
     buffer_io.buffer_write_u8(buf, u8(msg.kind))
 
     switch msg.kind {
+    case .Invalid: panic("invalid game message.")
+    case .START_GAME:
+        buffer_io.buffer_write_u32(buf, msg.start_game.user_id)
 
     case .CONNECT:
         buffer_io.buffer_write_u32(
@@ -369,6 +381,7 @@ pack_client_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
         panic("Client attempted to send a server message")
 
     case:
+        fmt.println(msg.kind)
         panic("Invalid MsgKind")
     }
 }
@@ -381,6 +394,10 @@ unpack_client_message :: proc(buf: ^buffer_io.Buffer) -> Msg {
     msg.kind = MsgKind(raw_kind)
 
     switch msg.kind {
+    case .Invalid: panic("invalid game message.")
+    case .START_GAME:
+        msg.start_game.user_id, ok = buffer_io.buffer_read_u32(buf)
+        assert(ok)
 
     case .GAME_DATA:
         msg.game_data.user_data.energy, ok =
@@ -500,6 +517,7 @@ unpack_client_message :: proc(buf: ^buffer_io.Buffer) -> Msg {
         panic("Client received a client message")
 
     case:
+        fmt.println(msg.kind)
         panic("Invalid MsgKind")
     }
 

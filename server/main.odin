@@ -25,11 +25,12 @@ Client :: struct {
     endpoint: net.Endpoint,
     last_ping: time.Time,
     move_to: raylib.Vector2,
-    move_origin:raylib.Vector2,
+    move_origin: raylib.Vector2,
     facing: raylib.Vector2,
     abilities: [ABILITIES_COUNT]game.EntityAbility,
-    // reliability layer
-    user_msg: u32, // increment when message successfull?
+
+    // connection state
+    no_send: bool,
 }
 PROJECTILES_COUNT :: 1024
 ABILITIES_COUNT ::  game.ABILITIES_COUNT
@@ -150,12 +151,32 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         c.abilities[0].ability_id = 1;
         c.abilities[0].level = 1;
         // set 
+        // add client, but don't send it normal game updates yet
+        c.no_send = true;
         g.entities[game.EntityHandle(id)] = c;
+
         sync.mutex_unlock(&g.entities_lock);
-        // send ok
+
+        // send initial state
         buffer_io.buffer_reset(buf);
-        // pack game data
-        panic("impl like look");
+
+        buffer_io.buffer_write_u8(buf, u8(game.MsgKind.GAME_DATA));
+        buffer_io.buffer_write_u8(buf, 1); // no_send
+        pack_game(g, buf, true);
+
+        // send ok
+        game.send_message(g.socket, endpoint, buf);
+    } else if msg.kind == .START_GAME {
+        id := msg.start_game.user_id;
+        sync.lock(&g.entities_lock);
+        c, ok := g.entities[id];
+        assert(ok);
+
+        c.no_send = false;
+        g.entities[id] = c;
+        sync.unlock(&g.entities_lock);
+
+        fmt.printfln("Starting game for:", id);
     } else if msg.kind == .PING {
         // fmt.print("ping ");
         id := msg.ping.user_id
@@ -427,6 +448,10 @@ send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
     sync.unlock(&g.entities_lock);
     last := time.now()
     for k in endpoints {
+        if k.no_send { // no send
+            continue;
+        }
+
         elapsed := math.abs(time.diff(last, k.last_ping));
         if elapsed > MAX_TIMEOUT {
             append(to_remove, k.k)

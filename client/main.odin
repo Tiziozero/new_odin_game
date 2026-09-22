@@ -211,7 +211,7 @@ MOUSE_DELTA :: 25
 send_user_ability :: proc(s: ^State, ability_index: u8) {
     fmt.println("User ability:", ability_index);
     // init msg
-    b := networking.init_send_message()
+    b := game.init_send_message()
     game.pack_client_message(&b, {kind=.USER_MSG, user_msg={
                 kind=.ABILITY,
                 ability={
@@ -221,7 +221,7 @@ send_user_ability :: proc(s: ^State, ability_index: u8) {
             }
         })
     // send
-    err := networking.send_message(socket=s.socket, endpoint=s.server_endpoint, b=&b)
+    err := game.send_message(socket=s.socket, endpoint=s.server_endpoint, b=&b)
     assert(err ==.None)
 }
 handle_input :: proc(e: ^InputEvent, s: ^State) {
@@ -258,13 +258,13 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 sposy := (e.click.y - 0.5) * SCALED_SCREEN_HEIGHT()
                 send_pos := raylib.Vector2{sposx, sposy} + game.rect_pos(p.body)
                 // init
-                b := networking.init_send_message()
+                b := game.init_send_message()
                 // write
                 game.pack_client_message(&b, {kind=.USER_MSG, user_msg={
                     user_id=ID, kind=.MOVE, move=send_pos
                 }})
                 // send
-                err := networking.send_message(s.socket, s.server_endpoint, &b)
+                err := game.send_message(s.socket, s.server_endpoint, &b)
                 assert(err == .None)
             }
         }
@@ -279,6 +279,13 @@ state_loop :: proc(s: ^State) {
 }
 
 ABILITIES_COUNT :: game.ABILITIES_COUNT
+user_specific_data :: struct {
+    energy: f32,
+
+    abilities: [ABILITIES_COUNT]PlayerAbility,
+
+    move_to: raylib.Vector2
+}
 unpack_user_specific_data :: proc(b: ^buffer_io.Buffer) -> user_specific_data {
     u := user_specific_data{};
     ok := false;
@@ -349,12 +356,12 @@ handle_server_msg :: proc(s: ^State, buf: ^buffer_io.Buffer) {
     if !ok {
         panic("Failed to read message kind")
     }
-    msg := networking.MsgKind(_msg)
+    msg := game.MsgKind(_msg)
     // fmt.printfln("got %d bytes (msg %d).", n, msg);
     #partial switch msg {
     case .GAME_MSG: {
         kind, ok := buffer_io.buffer_read_u8(buf); assert(ok);
-        #partial switch cast(networking.GameMsgKind)kind {
+        #partial switch cast(game.GameMsgKind)kind {
         case: panic("impl");
         }
     }
@@ -527,8 +534,8 @@ main :: proc() {
         if pdirection != prev_direction {
             s.pdirection = pdirection
             // send
-            // b := networking.init_send_message();
-            // networking.send_message(s.socket, s.server_endpoint, &b)
+            // b := game.init_send_message();
+            // game.send_message(s.socket, s.server_endpoint, &b)
         }
         // copy entities
         // clear_map(&s.current_entities)
@@ -714,9 +721,9 @@ main :: proc() {
             i = 0
             s.pings[ping_id] = time.now()
             // fmt.println("ping", ping_id, time.now())
-            b := networking.init_send_message()
+            b := game.init_send_message()
             game.pack_client_message(&b, {kind=.PING, ping={user_id=ID, id=u32(ping_id)}});
-            err := networking.send_message(s.socket, s.server_endpoint, &b)
+            err := game.send_message(s.socket, s.server_endpoint, &b)
             if err != .None {
                 fmt.println(err)
                 panic("Err in ping")
@@ -731,5 +738,5 @@ main :: proc() {
     raylib.CloseWindow()
     thread.join(t_receiver)
     net.close(s.socket)
-    // init networking state
+    // init game state
 }
