@@ -1,13 +1,18 @@
+// server.odin
 package main
 
+import "core:sys/posix"
 import "core:math/rand"
-import "core:sync"
 import "core:math"
-import "vendor:raylib"
+import "core:sync"
+import "core:time"
+import "core:thread"
 import "core:net"
 import "core:fmt"
 import "project:common/game"
 import "project:common/buffer_io"
+import "vendor:raylib"
+
 MIN_ODIN :: "dev-2026-06"
 
 when ODIN_VERSION < MIN_ODIN {
@@ -33,22 +38,14 @@ Client :: struct {
     no_send: bool,
 }
 PROJECTILES_COUNT :: 1024
-ABILITIES_COUNT ::  game.ABILITIES_COUNT
+ABILITIES_COUNT :: game.ABILITIES_COUNT
 Ability :: struct {
     kind: game.AbilityKind,
     action: AbilityProc,
 }
-EventKind :: enum {
-    SpawnProjectile,
-    RemoveProjectile,
-    UserAbility,
-}
-Event :: struct {
-    kind: EventKind,
-    p: game.Projectile, // projectile spawn
-}
 error :: distinct struct { error: string, ok: bool };
 AbilityProc :: distinct proc(g: ^Game, c: ^Client, id, level: u32, target: raylib.Vector2) -> error;
+
 @private
 Game :: struct {
     abilities: map[u32]Ability,
@@ -56,16 +53,21 @@ Game :: struct {
     projectiles: [PROJECTILES_COUNT]game.Projectile, // server_side_projectiles
     projectiles_count: u32,
 
+    // projectile spawn/remove events accumulated since the last time a
+    // tick's GameData was built; drained (and cleared) every tick.
     event_lock: sync.Mutex,
-    loop_events: [dynamic]Event,
+    loop_events: [dynamic]game.ProjectileEvent,
 
     entities_lock: sync.Mutex,
     socket: net.UDP_Socket,
     assets: game.AssetManger,
     gmap: game.Map,
 }
-game_add_event :: proc(g: ^Game, e: Event) {
-    append(&g.loop_events, e);
+
+game_add_projectile_event :: proc(g: ^Game, ev: game.ProjectileEvent) {
+    sync.lock(&g.event_lock)
+    append(&g.loop_events, ev)
+    sync.unlock(&g.event_lock)
 }
 
 game_init :: proc() -> Game {
@@ -75,69 +77,69 @@ game_init :: proc() -> Game {
     game.generate_chunck(&g.gmap, 0,0);
     g.entities = make(map[game.EntityHandle]Client);
     g.abilities = make(map[u32]Ability);
+    g.loop_events = make([dynamic]game.ProjectileEvent);
     g.abilities[1] = Ability{
         action=proc(g: ^Game, c: ^Client, id, level: u32, target:raylib.Vector2) -> error {
             assert(c.entity.id != 0)
+            origin := game.rect_pos(c.entity.body) + 0.5* game.rect_size(c.entity.body);
             p := game.Projectile {
                 owner=c.entity.id,
-                origin=game.rect_pos(c.entity.body),
+                origin=origin,
+                position=origin,
+                speed=100,
                 range=200,
-                direction=target-game.rect_pos(c.entity.body),
+                direction=target,
             };
-            fmt.println("ability called with level:", level);
             game_spawn_projectile(g, p)
             return {"", true }
         },
     };
     return g;
 }
+
 global_projectile_id: u32 = 0
 game_spawn_projectile :: proc(g: ^Game, _p: game.Projectile) {
     p := _p
-    p.id = global_projectile_id;
-    global_projectile_id += 1;
-    g.projectiles[g.projectiles_count] = p;
-    g.projectiles_count += 1;
-    sync.lock(&g.event_lock)
-    game_add_event(g, {kind=.SpawnProjectile, p=p})
-    sync.unlock(&g.event_lock)
-    fmt.println("Projectile:", p);
-}
+    p.id = global_projectile_id
+    global_projectile_id += 1
+    p.active = true
 
-write_projectile :: proc(g: ^Game, b: ^buffer_io.Buffer, p: game.Projectile) {
-    buffer_io.buffer_write(b, p.id)
-    buffer_io.buffer_write(b, p.projectile_id)
-    buffer_io.buffer_write(b, p.owner)
-    buffer_io.buffer_write(b, p.origin.x)
-    buffer_io.buffer_write(b, p.origin.y)
-    buffer_io.buffer_write(b, p.direction.x)
-    buffer_io.buffer_write(b, p.direction.y)
+    sync.mutex_lock(&g.entities_lock)
+    g.projectiles[g.projectiles_count] = p
+    g.projectiles_count += 1
+    sync.mutex_unlock(&g.entities_lock)
+
+    game_add_projectile_event(g, game.ProjectileEvent{
+        kind = .SPAWN_PROJECTILE,
+        data = game.SpawnProjectileMsg{projectile = p},
+    })
 }
 
 init_server_socket :: proc(g: ^Game) {
     s, _ := game.init_udp_socket(port=8081);
     g.socket = s;
 }
-game_handle_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
-}
-import "core:time"
-import "core:thread"
+
+// ---------------------------------------------------------------------
+// Incoming messages from clients
+// ---------------------------------------------------------------------
 
 handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint) {
-    fmt.println("BUFFER:", buf.data[:buf.len])
     msg := game.unpack_server_message(buf)
-    if msg.kind == .CONNECT {
+
+    switch msg.kind {
+    case .CONNECT:
+        d := msg.data.(game.ConnectMsg)
+        id := d.user_id
         fmt.println("Connect");
-        id := msg.connect.user_id
         fmt.printfln("\taccess token: %d", id);
+
         sync.mutex_lock(&g.entities_lock);
-        // in future get proper shi
         c := Client{}
         c.endpoint = endpoint;
         c.max_health = 100
         c.attack = 15
         t := u32(rand.int31()%i32(len(g.assets.assets)));
-        // fmt.println(t, len(g.assets.assets));
         c.entity = game.Entity{
             texture=t,
             health=c.max_health,
@@ -151,39 +153,37 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         c.abilities[0].active = true;
         c.abilities[0].ability_id = 1;
         c.abilities[0].level = 1;
-        // set 
-        // add client, but don't send it normal game updates yet
         c.no_send = true;
         g.entities[game.EntityHandle(id)] = c;
-
         sync.mutex_unlock(&g.entities_lock);
 
-        // Uses a fresh, one-shot buffer for this reply instead of the
-        // receiver loop's shared `buf`, since game.send_message destroys
-        // whatever buffer it's given.
-        b := game.init_send_message()
-        buffer_io.buffer_write_u8(&b, u8(game.MsgKind.GAME_DATA));
-        pack_game(g, &b, true);
-        game.send_message(g.socket, endpoint, &b); // frees `b`; shared `buf` is untouched
+        // Full sync: every entity's full state plus every currently
+        // active projectile, so a freshly-connected client always
+        // starts from a complete, consistent snapshot.
+        data := build_game_data(g, full_sync = true)
+        data.user_data = build_user_data(c)
 
-    } else if msg.kind == .START_GAME {
-        fmt.println("START GAME");
-        id := msg.start_game.user_id;
+        b := game.init_send_message()
+        game.pack_server_message(&b, game.Msg{kind = .GAME_DATA, data = data})
+        game.send_message(g.socket, endpoint, &b)
+        free_all(context.temp_allocator)
+
+    case .START_GAME:
+        d := msg.data.(game.StartGameMsg)
+        id := d.user_id;
         sync.lock(&g.entities_lock);
         c, ok := g.entities[id];
         assert(ok);
-
         c.no_send = false;
         g.entities[id] = c;
         sync.unlock(&g.entities_lock);
+        fmt.println("Starting game for:", id);
 
-        fmt.printfln("Starting game for:", id);
-    } else if msg.kind == .PING {
-        // fmt.print("ping ");
-        id := msg.ping.user_id
-        ping_id := msg.ping.id
+    case .PING:
+        d := msg.data.(game.PingMsg)
+        id := d.user_id
+        ping_id := d.id
 
-        // update last ping
         sync.mutex_lock(&g.entities_lock);
         last, uok := g.entities[game.EntityHandle(id)];
         if !uok {
@@ -194,56 +194,49 @@ handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint
         g.entities[game.EntityHandle(id)] = last;
         sync.mutex_unlock(&g.entities_lock);
 
-        // write confirmation — already uses its own one-shot buffer.
         b := game.init_send_message()
-        game.pack_server_message(&b, {kind=.PING_RESPOND, ping_response=ping_id})
+        game.pack_server_message(&b, game.Msg{
+            kind = .PING_RESPOND,
+            data = game.PingRespondMsg{id = ping_id},
+        })
         game.send_message(g.socket, endpoint, &b);
-    } else if msg.kind == .USER_MSG {
-        id := msg.user_msg.user_id;
-        kind := msg.user_msg.kind
-        switch kind {
-            case .MOVE: {
-                // FIXED: use the values unpack_server_message already parsed
-                // into msg.user_msg.move, instead of re-reading from `buf`.
-                // unpack_server_message's USER_MSG/.MOVE case already
-                // consumed these two f32s and advanced buf.pos past them,
-                // so calling buffer_io.buffer_read_f32(buf) here a second
-                // time read whatever came after (or past buf.len), tripping
-                // the assert(ok) or silently corrupting move_to with junk.
-                sync.lock(&g.entities_lock);
-                last, eok := g.entities[id]
-                assert(eok);
-                last.move_to.x = msg.user_msg.move.x
-                last.move_to.y = msg.user_msg.move.y
-                last.move_origin.x = last.entity.body.x
-                last.move_origin.y = last.entity.body.y
-                g.entities[id] = last;
-                sync.unlock(&g.entities_lock);
-            }
-            case .ABILITY: {
-                // FIXED: same issue — use msg.user_msg.ability, already
-                // unpacked (index + direction), instead of re-reading buf.
-                index := msg.user_msg.ability.user_ability_index
-                target := msg.user_msg.ability.direction
-                fmt.println("Ability cast:", index)
-                cast_ability(g, id, index, target);
-            }
-        case .DIRECTION: {
-            // FIXED: same issue — use msg.user_msg.direction, already
-            // unpacked, instead of re-reading buf.
+
+    case .USER_MSG:
+        d := msg.data.(game.UserMsg)
+        id := d.user_id
+
+        switch v in d.data {
+        case game.MoveMsg:
             sync.lock(&g.entities_lock);
             last, eok := g.entities[id]
             assert(eok);
-            last.facing = msg.user_msg.direction;
+            last.move_to.x = v.pos.x
+            last.move_to.y = v.pos.y
+            last.move_origin.x = last.entity.body.x
+            last.move_origin.y = last.entity.body.y
+            g.entities[id] = last;
+            sync.unlock(&g.entities_lock);
+
+        case game.AbilityMsg:
+            cast_ability(g, id, v.user_ability_index, v.direction);
+
+        case game.DirectionMsg:
+            sync.lock(&g.entities_lock);
+            last, eok := g.entities[id]
+            assert(eok);
+            last.facing = v.direction;
             g.entities[id] = last;
             sync.unlock(&g.entities_lock);
         }
-        case: panic("Handle case");
-        }
-    } else {
-        panic("unknown message");
+
+    case .GET_STATE:
+        // no payload / not currently used
+
+    case .Invalid, .GAME_DATA, .GAME_MSG, .PING_RESPOND:
+        panic("Server received an invalid or server-only message")
     }
 }
+
 gpid :u32= 0
 add_projectile :: proc(g: ^Game, i: game.Projectile) {
     p := i
@@ -256,10 +249,17 @@ add_projectile :: proc(g: ^Game, i: game.Projectile) {
     g.projectiles[g.projectiles_count] = p
     g.projectiles_count += 1;
 }
+
 cast_ability :: proc(g: ^Game, id: u32, index: u8, target: raylib.Vector2) {
-    assert(index < ABILITIES_COUNT);
+    if index >= ABILITIES_COUNT {
+        fmt.panicf("Ability index out of range: %d of %d.\n", index, ABILITIES_COUNT)
+    }
     sync.lock(&g.entities_lock)
-    e, ok := g.entities[id]; assert(ok);
+    e, ok := g.entities[id];
+    if !ok {
+        fmt.println("entity:", id);
+        panic("Failed to get entity from game.")
+    }
     sync.unlock(&g.entities_lock)
     user_ability := e.abilities[index]
     if ! user_ability.active {
@@ -268,39 +268,69 @@ cast_ability :: proc(g: ^Game, id: u32, index: u8, target: raylib.Vector2) {
     }
     ability_id := user_ability.ability_id;
     ability, aok := g.abilities[ability_id]; assert(aok);
-    fmt.println("Abilitty:", ability)
     ability.action(g, &e, ability_id, user_ability.level, target)
 }
-pack_game :: proc(g: ^Game, buf: ^buffer_io.Buffer, all := false) -> int {
-    // buffer_io.buffer_reset(buf);
-    buffer_io.buffer_write_u32(buf, u32(len(g.entities)));
-    sync.mutex_lock(&g.entities_lock);
-    for k, e in g.entities {
-        if all do fmt.println(k, e.entity)
-        delta := game.get_entity_delta(e.last_entity, e.entity, all = all);
-        if delta.delta > 0 {
-            // fmt.println("Delta:", delta);
-        }
-        buffer_io.buffer_write_u32(buf, u32(k));
-        game.pack_entity(buf, &delta);
+
+// ---------------------------------------------------------------------
+// GameData construction (used for both per-tick sends and the CONNECT
+// full-sync send)
+// ---------------------------------------------------------------------
+
+build_user_data :: proc(c: Client) -> game.UserData {
+    u := game.UserData{}
+    u.energy = c.energy
+    for i in 0 ..< ABILITIES_COUNT {
+        a := c.abilities[i]
+        u.abilities[i].active     = 1 if a.active else 0
+        u.abilities[i].ability_id = a.ability_id
+        u.abilities[i].level      = a.level
+        u.abilities[i].cooldown   = a.cooldown
     }
-    if all { // pacl projectiles
-        buffer_io.buffer_write_u32(buf, g.projectiles_count);
-        for i in 0..<g.projectiles_count {
-        }
-    }
-    buffer_io.buffer_write_u32(buf, 0);
-    sync.mutex_unlock(&g.entities_lock);
-    // 0 at the end
-    return buf.len;
+    u.move_to = c.move_to
+    return u
 }
+
+// Allocates its result slices with context.temp_allocator - callers
+// must free_all(context.temp_allocator) once they're done sending it.
+build_game_data :: proc(g: ^Game, full_sync: bool) -> game.GameData {
+    data := game.GameData{full_sync = full_sync}
+
+    sync.mutex_lock(&g.entities_lock)
+    entities := make([dynamic]game.EntityUpdate, 0, len(g.entities), context.temp_allocator)
+    for k, e in g.entities {
+        delta := game.get_entity_delta(e.last_entity, e.entity, all = full_sync)
+        append(&entities, game.EntityUpdate{id = u32(k), delta = delta})
+    }
+
+    if full_sync {
+        full := make([]game.Projectile, g.projectiles_count, context.temp_allocator)
+        copy(full, g.projectiles[:g.projectiles_count])
+        data.full_projectiles = full
+    }
+    sync.mutex_unlock(&g.entities_lock)
+    data.entities = entities[:]
+
+    if !full_sync {
+        sync.lock(&g.event_lock)
+        events := make([]game.ProjectileEvent, len(g.loop_events), context.temp_allocator)
+        copy(events, g.loop_events[:])
+        clear(&g.loop_events)
+        sync.unlock(&g.event_lock)
+        data.projectile_events = events
+    }
+
+    return data
+}
+
+// ---------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------
+
 handle_receiver_loop :: proc(g: ^Game) {
     buf := buffer_io.buffer_make(1024);
     for {
         n, endpoint, err := net.recv_udp(g.socket, buf.data[:]);
         if err != .None {
-            if err == .Connection_Refused {
-            }
             fmt.println(err)
             panic("recevied error");
         }
@@ -309,11 +339,9 @@ handle_receiver_loop :: proc(g: ^Game) {
         }
         buf.len = n;
         handle_user_msg(g, &buf, endpoint);
+        free_all(context.temp_allocator)
         buffer_io.buffer_reset(&buf);
     }
-}
-pack_game_loop_data :: proc(g: ^Game, buf: ^buffer_io.Buffer) {
-    pack_game(g, buf)
 }
 
 update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
@@ -336,27 +364,17 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
                 // so if the entity's colliding against two perpendiculat walls,
                 // only one's checked at a time
         if  v, ok := game.check_entity_map_collisions(&g.gmap, c.entity); ok {
-            // v is new pos AFTER collision.
-            // if the distance moved AFTER COLLISSION is less than a threashold,
-            // then move was irrelevant/entity's stuck or can't move further,
-            // so stop moving
             dist := raylib.Vector2Distance(current_pos, v) < 0.25
-            fmt.println("Collision", dist);
             if  dist {
-                fmt.println("same: ", current_pos, v)
                 c.move_to = v;
             }
-
             c.entity.body.x = v.x
             c.entity.body.y = v.y
-            // c.move_to = game.rect_pos(c.entity.body)
         } else {
             break
         }
         i+=1
     }
-    // check for 2 walls.if there's a third collision the it's likely the
-    // entity's bugged
     if i == 3 {
         panic("Had to check 3 times for collisions");
     }
@@ -366,72 +384,76 @@ update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
         panic("body size too small");
     }
 }
+
 MAX_TIMEOUT :: 10 * time.Second
-// straight garbage basically. stress test, if you will
-pack_user_specific_data :: proc(c: snapshot_entry, buf: ^buffer_io.Buffer) {
-    buffer_io.buffer_write_f32(buf, c.energy)
-    for i in 0..<ABILITIES_COUNT {
-        buffer_io.buffer_write_u32(buf, c.abilities[i].ability_id)
-        buffer_io.buffer_write_u32(buf, c.abilities[i].level)
-        buffer_io.buffer_write_f32(buf, c.abilities[i].cooldown)
-    }
-    buffer_io.buffer_write_f32(buf, c.move_to.x)
-    buffer_io.buffer_write_f32(buf, c.move_to.y)
-    
-}
 
 snapshot_entry :: struct {
     k: game.EntityHandle,
     using c: Client,
 }
+
 p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
     if p.x >= r.x && p.x <= r.x+r.width {
         if p.y >= r.y && p.y <= r.y+r.height { return true }
     }
     return false
 }
+
+// Returns the projectile's (possibly updated) state and whether it
+// should be removed. When remove is true, the returned projectile's
+// `id` is still valid - callers need it to emit a REMOVE_PROJECTILE
+// event.
 update_projectile :: proc(g: ^Game, last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
-    fmt.println("updating projectile");
     p := last_p
-    pspeed :f32 = 100
-    // update position
-    prev_pos := last_p.position;
-    new_pos := prev_pos + raylib.Vector2Normalize(last_p.direction)*pspeed*dt;
-    for id, e in g.entities {
-        if p_in_rect(e.entity.body, new_pos) {
-            // hit
-            fmt.println("hit");
-            return {}, true
+    pspeed := last_p.speed
+    prev_pos := last_p.position
+    new_pos := prev_pos + raylib.Vector2Normalize(last_p.direction) * pspeed * dt
+    p.position = new_pos
+
+    for _, e in g.entities {
+        if e.entity.id == last_p.owner {
+            continue
+        }
+        if p_in_rect(e.entity.body, p.position) {
+            return p, true // hit
         }
     }
-    p.position = new_pos
-    if raylib.Vector2Distance(new_pos, last_p.origin) > p.range {
-        fmt.println(raylib.Vector2Distance(new_pos, last_p.origin))
-        fmt.println("removing projectile", p.range, new_pos, last_p.origin);
-        return p, true
+
+    if game.check_point_map_collisions(&g.gmap, p.position) {
+        
+        return p, true // hit wall
+    }
+
+    if raylib.Vector2Distance(p.position, last_p.origin) > p.range {
+        return p, true // out of range
     }
     return p, false
 }
+
 update_game :: proc(g: ^Game, dt: f32) {
     sync.mutex_lock(&g.entities_lock);
     for k, e in g.entities {
         c := e;
-           update_client(g, &c, dt);
-           g.entities[k] = c;
+        update_client(g, &c, dt);
+        g.entities[k] = c;
     }
+
     i := u32(0)
     for i < g.projectiles_count {
         p := g.projectiles[i]
-
         np, remove := update_projectile(g, p, dt)
 
         if remove {
+            game_add_projectile_event(g, game.ProjectileEvent{
+                kind = .REMOVE_PROJECTILE,
+                data = game.RemoveProjectileMsg{projectile_id = np.id},
+            })
+
             last := g.projectiles_count - 1
             g.projectiles[i] = g.projectiles[last]
             g.projectiles_count -= 1
-
-            // don't increment i here, because we need to
-            // process the projectile we just swapped in
+            // don't increment i - the projectile swapped into this slot
+            // still needs to be processed
             continue
         }
 
@@ -441,47 +463,43 @@ update_game :: proc(g: ^Game, dt: f32) {
     sync.mutex_unlock(&g.entities_lock);
 }
 
+send_game_data :: proc(
+    g: ^Game,
+    endpoints: ^[dynamic]snapshot_entry,
+    to_remove: ^[dynamic]game.EntityHandle,
+) {
+    shared := build_game_data(g, full_sync = false)
 
-send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
-    endpoints: ^[dynamic]snapshot_entry, to_remove: ^[dynamic]game.EntityHandle) {
-    //  write in loop before user specific data
-    // buffer_io.buffer_write_u8(&buf, game.MSG_GAME_DATA);
-    pack_game_loop_data(g, buf);
     sync.lock(&g.entities_lock);
     for k, e in g.entities {
-        append(endpoints, snapshot_entry{k,e})
+        append(endpoints, snapshot_entry{k, e})
     }
     sync.unlock(&g.entities_lock);
+
     last := time.now()
     for k in endpoints {
-        if k.no_send { // no send
+        if k.no_send {
             continue;
         }
 
         elapsed := math.abs(time.diff(last, k.last_ping));
         if elapsed > MAX_TIMEOUT {
             append(to_remove, k.k)
-        } else {
-            buffer_io.buffer_reset(user_buf)
-            buffer_io.buffer_write_u8(user_buf, u8(game.MsgKind.GAME_DATA));
-            pack_user_specific_data(k, user_buf)
-            // only write to buf.len, which is bytes of relevant data
-            wrote, ok := buffer_io.buffer_write_bytes(user_buf, buf.data[:buf.len])
-            if ! ok {
-                fmt.println(user_buf.len, user_buf.cap, len(user_buf.data))
-                fmt.println(buf.len, buf.cap, len(buf.data))
-            }
-            assert(ok);
-            assert(wrote == buf.len)
-            sn, err := net.send_udp(g.socket, user_buf.data[:user_buf.len], k.endpoint);
-            if err != .None {
-                panic("err in sending to client");
-            }
-            if sn != user_buf.len {
-                panic("Didn't send all bytes");
-            }
+            continue
+        }
+
+        data := shared
+        data.user_data = build_user_data(k.c)
+
+        b := game.init_send_message()
+        game.pack_server_message(&b, game.Msg{kind = .GAME_DATA, data = data})
+
+        err := game.send_message(g.socket, k.endpoint, &b)
+        if err != .None {
+            panic("err in sending to client");
         }
     }
+
     if len(to_remove) > 0 {
         sync.mutex_lock(&g.entities_lock);
         for k in to_remove {
@@ -491,37 +509,32 @@ send_game_data :: proc(g:^Game, buf, user_buf: ^buffer_io.Buffer,
         clear_dynamic_array(to_remove);
         sync.mutex_unlock(&g.entities_lock);
     }
-    // clear
-    buffer_io.buffer_reset(buf);
     clear_dynamic_array(endpoints)
-
 }
-// user message:
-// [user specific data][game data]
+
+// server tick: [simulate] -> every 3rd tick, [send GameData to everyone]
 handle_sender_loop :: proc(g: ^Game) {
     duration := time.Duration(10) * time.Millisecond
-    buf := buffer_io.buffer_make(1024); // make once
     to_remove := make([dynamic]game.EntityHandle);
     endpoints := make([dynamic]snapshot_entry);
     dt : f32 = 0;
-    user_buf := buffer_io.buffer_make(1024) // make once
     i := 0;
     for {
         start := time.now()
         update_game(g, dt)
-        // send data once every 3 updates
         if i < 3 {
             i+=1
         } else {
             i = 0
-            send_game_data(g, &buf, &user_buf, &endpoints, &to_remove)
+            send_game_data(g, &endpoints, &to_remove)
         }
+        free_all(context.temp_allocator)
+
         elapsed := time.since(start)
         if elapsed < duration {
-            // inacurate on wls, sometimes jumps to 2.9 seconds wait
             time.sleep(duration - elapsed)
         }
-        dt_elapsed := time.since(start) // with sleep
+        dt_elapsed := time.since(start)
         dt = f32(dt_elapsed)/f32(time.Second)
     }
 }
@@ -535,7 +548,6 @@ thread_sender_fn :: proc(data: rawptr) {
 
 import "core:sys/windows"
 main :: proc() {
-    // disable "ICMP"
     g := game_init()
     init_server_socket(&g)
     when ODIN_OS == .Windows {
@@ -554,11 +566,10 @@ main :: proc() {
     } else when ODIN_OS == .Linux {
         fmt.println("Running on Linux.")
     } else {
-        fmt.println("Running on an unsupported/unidentified OS.")
+        fmt.panicf("Running on an unsupported/unidentified OS.\n")
     }
     t_receiver := thread.create_and_start_with_data(data=&g, fn=thread_receiver_fn);
     t_sender := thread.create_and_start_with_data(data=&g, fn=thread_sender_fn);
-
 
     thread.join(t_receiver)
     thread.join(t_sender)

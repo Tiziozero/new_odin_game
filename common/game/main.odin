@@ -192,17 +192,13 @@ load_assets :: proc(config_path: string, load:=false, allocator:=context.allocat
         panic("JSON error")
     }
 
-    fmt.println(config)
     am := AssetManger{}
-    fmt.println("Len assets config:", len(config))
     am.assets = make([]Asset, len(config));
     for k, i in config {
-        fmt.println(i, "loading", k.img);
         cstr := strings.clone_to_cstring(k.img, allocator=allocator)
         t : raylib.Texture2D
         if load {
             t = raylib.LoadTexture(cstr);
-            fmt.println("texture id for", cstr, ":", t.id)
         } 
         am.assets[i] = Asset {
             img = k.img,
@@ -254,13 +250,28 @@ check_entity_map_collisions :: proc (m: ^Map, entity: Entity) -> (raylib.Vector2
              for t in chunk.collidables {
                  // make it so that it stops moving at collision with wall.
                  if v, ok := entity_wall_collision(entity.body, t); ok {
-                     fmt.println(v)
                      return v, true
                  }
              }
         }
     }
     return {}, false
+}
+check_point_map_collisions :: proc(m: ^Map, p: raylib.Vector2) -> bool {
+    chunck_i_x := int(p.x / CHUNK_SIDE_SIZE)
+    chunck_i_y := int(p.y / CHUNK_SIDE_SIZE)
+    for x in -1..=1 {
+        for y in -1..=1 {
+            chunk_i := v2i{x=chunck_i_x+x, y=chunck_i_y+y}
+            chunk := map_get_chunk(m, chunk_i)
+            for t in chunk.collidables {
+                if p.x >= t.x && p.x <= t.x+t.width && p.y >= t.y && p.y <= t.y+t.height {
+                    return true
+                }
+            }
+        }
+    }
+    return false
 }
 AbilityKind :: enum {
     Projectile,
@@ -278,32 +289,9 @@ EntityAbility :: struct {
 // and clients predict movement.
 Projectile :: struct {
     origin, direction, position: raylib.Vector2,
-    range: f32,
+    speed, range: f32,
     active: bool, // is active
     projectile_id : u32, // what kind projectile
     id: u32, // which projectile
     owner: u32,
-}
-pack_projectile_spawn_data :: proc (p: Projectile, b: ^buffer_io.Buffer) {
-    buffer_io.buffer_write_u32(b, p.id)
-    buffer_io.buffer_write_u32(b, p.projectile_id)
-    buffer_io.buffer_write_f32(b, p.origin.x)
-    buffer_io.buffer_write_f32(b, p.origin.y)
-    buffer_io.buffer_write_f32(b, p.direction.y)
-    buffer_io.buffer_write_f32(b, p.direction.x)
-    buffer_io.buffer_write_f32(b, p.position.x)
-    buffer_io.buffer_write_f32(b, p.position.y)
-}
-unpack_projectile_spawn_data :: proc (b: ^buffer_io.Buffer) -> Projectile {
-    ok: bool
-    p: Projectile
-    p.id, ok = buffer_io.buffer_read_u32(b); assert(ok)
-    p.projectile_id, ok = buffer_io.buffer_read_u32(b); assert(ok)
-    p.origin.x, ok = buffer_io.buffer_read_f32(b); assert(ok)
-    p.origin.y, ok = buffer_io.buffer_read_f32(b); assert(ok)
-    p.direction.x, ok = buffer_io.buffer_read_f32(b); assert(ok)
-    p.direction.y, ok = buffer_io.buffer_read_f32(b); assert(ok)
-    p.position.x, ok = buffer_io.buffer_read_f32(b); assert(ok)
-    p.position.y, ok = buffer_io.buffer_read_f32(b); assert(ok)
-    return p
 }

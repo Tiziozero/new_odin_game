@@ -37,7 +37,7 @@ init_game_con :: proc(s: ^State) -> i32 {
 
     buf := game.init_send_message()
 
-    game.pack_client_message(&buf, {kind=.CONNECT, connect={user_id=ID}})
+    game.pack_client_message(&buf, {kind=.CONNECT, data=game.ConnectMsg{user_id=ID}})
 
     nerr := game.send_message(socket, server_endpoint, &buf)
     if nerr != .None {
@@ -93,7 +93,8 @@ init_game_con :: proc(s: ^State) -> i32 {
 
     // populates s.state_entities (and projectiles) directly, so the
     // ID lookup right after init_game_con in main() succeeds.
-    unpack_game_data(s, &recv_buf)
+    data := game.unpack_game_data(&recv_buf)
+    apply_game_data(s, data)
 
     fmt.println("Parsed initial game state.")
 
@@ -103,7 +104,7 @@ init_game_con :: proc(s: ^State) -> i32 {
 
     start_buf := game.init_send_message()
 
-    game.pack_client_message(&start_buf, {kind=.START_GAME, start_game={user_id=ID}})
+    game.pack_client_message(&start_buf, {kind=.START_GAME, data=game.StartGameMsg{user_id=ID}})
     fmt.println("start buf:", start_buf.data[:start_buf.len])
 
     merr := game.send_message(socket, server_endpoint, &start_buf)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -e -x
 odin build ./client -collection:project=. -out:client_bin -debug
 ./client_bin
 

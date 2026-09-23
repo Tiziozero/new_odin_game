@@ -114,7 +114,7 @@ InputEvent :: struct {
     scroll_delta: f32,
 }
 slog :: proc(s: ^State, format: string, str: ..any) {
-    log := fmt.aprintf(format, str, allocator=s.frame_arena.block_allocator)
+    log := fmt.aprintf(format, ..str, allocator=s.frame_arena.block_allocator)
     append(&s.logs, log)
 }
 rl_to_game :: proc(events: ^[dynamic]InputEvent) {
@@ -205,26 +205,10 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
 }
 draw_projectile :: proc(s: ^State, p: ^game.Projectile) {
     dr := apply_camera(s, p.position);
-    draw_rect(s, pos=dr, size=raylib.Vector2{1,1}, tint=raylib.YELLOW)
+    draw_rect(s, pos=dr, size=raylib.Vector2{5,5}, tint=raylib.YELLOW)
 }
 MAX_ZOOM_FACTOR :: 8
 MOUSE_DELTA :: 25
-send_user_ability :: proc(s: ^State, ability_index: u8) {
-    fmt.println("User ability:", ability_index);
-    // init msg
-    b := game.init_send_message()
-    game.pack_client_message(&b, {kind=.USER_MSG, user_msg={
-                kind=.ABILITY,
-                ability={
-                    user_ability_index=ability_index,
-                    direction=s.pdirection,
-                }
-            }
-        })
-    // send
-    err := game.send_message(socket=s.socket, endpoint=s.server_endpoint, b=&b)
-    assert(err ==.None)
-}
 handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
     case .IE_SCROLL: // no scroll
@@ -246,7 +230,6 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 send_user_ability(s, 3);
             case .T:
                 s.debug = !s.debug
-                fmt.println("TOGGLE DEBUG")
             case .K:
                 bool_snap = !bool_snap
             case:
@@ -260,12 +243,17 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
                 sposy := (e.click.y - 0.5) * SCALED_SCREEN_HEIGHT()
                 send_pos := raylib.Vector2{sposx, sposy} + game.rect_pos(p.body)
                 // init
+                // --- handle_input: MOVE case inside IE_MB_PRESSED / RIGHT ---
+                // replace the block that builds/sends the move message with:
                 b := game.init_send_message()
-                // write
-                game.pack_client_message(&b, {kind=.USER_MSG, user_msg={
-                    user_id=ID, kind=.MOVE, move=send_pos
-                }})
-                // send
+                game.pack_client_message(&b, game.Msg{
+                    kind = .USER_MSG,
+                    data = game.UserMsg{
+                        user_id = ID,
+                        kind    = .MOVE,
+                        data    = game.MoveMsg{pos = send_pos},
+                    },
+                })
                 err := game.send_message(s.socket, s.server_endpoint, &b)
                 assert(err == .None)
             }
@@ -288,115 +276,132 @@ user_specific_data :: struct {
 
     move_to: raylib.Vector2
 }
-unpack_user_specific_data :: proc(b: ^buffer_io.Buffer) -> user_specific_data {
-    u := user_specific_data{};
-    ok := false;
-    u.energy, ok = buffer_io.buffer_read_f32(b);  assert(ok);
-    for i in 0..<ABILITIES_COUNT {
-        u.abilities[i].ability_id, ok = buffer_io.buffer_read_u32(b);  assert(ok);
-        u.abilities[i].level, ok = buffer_io.buffer_read_u32(b);  assert(ok);
-        u.abilities[i].cooldown, ok = buffer_io.buffer_read_f32(b);  assert(ok);
-    }
-    u.move_to.x, ok = buffer_io.buffer_read_f32(b);  assert(ok);
-    u.move_to.y, ok = buffer_io.buffer_read_f32(b);  assert(ok);
-    return u;
-}
-unpack_game_data :: proc(s: ^State, buf: ^buffer_io.Buffer) {
-    // --- Entities ---
-    count, ok := buffer_io.buffer_read_u32(buf)
-    assert(ok)
 
-    sync.lock(&s.state_lock)
-    for i in 0 ..< count {
-        id, ok := buffer_io.buffer_read_u32(buf)
-        assert(ok)
-        delta := game.EntityDelta{}
-        game.unpack_entity(buf, &delta)
-
-        last, last_ok := s.state_entities[id]
-        if !last_ok {
-            last = game.Entity{}
-        }
-        last.id = id
-        game.implement_entity_delta(&last, &delta)
-        s.state_entities[id] = last
-    }
-    sync.unlock(&s.state_lock)
-    // --- Projectiles ---
-    ps, ps_ok := buffer_io.buffer_read_u32(buf)
-    assert(ps_ok)
-    // slog(s, "%d projectiles", ps)
-
-    if ps > 0 {
-        sync.lock(&s.state_lock)
-        // Grow slice if needed
-        for u32(len(s.projectiles)) < ps {
-            append(&s.projectiles, game.Projectile{})
-        }
-        for i in 0 ..< ps {
-            p := game.unpack_projectile_spawn_data(buf)
-            p.active = true
-            s.projectiles[i] = p
-        }
-        // Deactivate any old projectiles beyond the new count
-        for i in ps ..< u32(len(s.projectiles)) {
-            s.projectiles[i].active = false
-        }
-        s.projectiles_count = ps
-        sync.unlock(&s.state_lock)
-    } else {
-        sync.lock(&s.state_lock)
-        for i in 0 ..< u32(len(s.projectiles)) {
-            s.projectiles[i].active = false
-        }
-        s.projectiles_count = 0
-        sync.unlock(&s.state_lock)
-    }
-}
+// --- replace handle_server_msg entirely ---
 handle_server_msg :: proc(s: ^State, buf: ^buffer_io.Buffer) {
-    _msg, ok := buffer_io.buffer_read_u8(buf)
-    if !ok {
-        panic("Failed to read message kind")
-    }
-    msg := game.MsgKind(_msg)
-    // fmt.printfln("got %d bytes (msg %d).", n, msg);
-    #partial switch msg {
-    case .GAME_MSG: {
-        kind, ok := buffer_io.buffer_read_u8(buf); assert(ok);
-        #partial switch cast(game.GameMsgKind)kind {
-        case: panic("impl");
-        }
-    }
-    case .GAME_DATA: {
-        sync.lock(&s.state_lock); {
-            user_specific := unpack_user_specific_data(buf)
-            s.move_to    = user_specific.move_to
-            s.abilities  = user_specific.abilities
-            s.energy     = user_specific.energy
-        }; sync.unlock(&s.state_lock)
+    msg := game.unpack_client_message(buf)
 
-        unpack_game_data(s, buf)
-    } 
-    case .PING_RESPOND: {
-        pingid, ok := buffer_io.buffer_read_i32(buf)
-        assert(ok)
-        last, pok := s.pings[u8(pingid)]
+    switch msg.kind {
+    case .GAME_DATA:
+        data := msg.data.(game.GameData)
+        apply_game_data(s, data)
+
+    case .GAME_MSG:
+        // Not currently sent by the server (projectile changes travel
+        // inside GameData.projectile_events instead) - reserved for
+        // future out-of-band events.
+
+    case .PING_RESPOND:
+        d := msg.data.(game.PingRespondMsg)
+        sync.lock(&s.state_lock)
+        last, pok := s.pings[u8(d.id)]
         if !pok {
-            fmt.println(pingid)
+            fmt.println(d.id)
             panic("Notnok for pihg id")
         }
-        delete_key(&s.pings, u8(pingid))
+        delete_key(&s.pings, u8(d.id))
         now := time.now()
         diff := time.diff(now, last)
         s.ping = f32(diff) / f32(time.Millisecond)
+        sync.unlock(&s.state_lock)
 
-    }
-    case: {
-        fmt.println(msg)
-        panic("Unknown message")
-    }
+    case .Invalid, .CONNECT, .START_GAME, .GET_STATE, .PING, .USER_MSG:
+        fmt.println(msg.kind)
+        panic("Unknown or client-only message received")
     }
 }
+
+// Applies one GameData snapshot to client state. Same function handles
+// both a normal delta tick and the post-CONNECT full sync - the only
+// difference is which branch of the projectile logic runs.
+apply_game_data :: proc(s: ^State, data: game.GameData) {
+    sync.lock(&s.state_lock)
+
+    s.energy = data.user_data.energy
+    for i in 0 ..< ABILITIES_COUNT {
+        a := data.user_data.abilities[i]
+        s.abilities[i].active     = a.active
+        s.abilities[i].ability_id = a.ability_id
+        s.abilities[i].level      = a.level
+        s.abilities[i].cooldown   = a.cooldown
+    }
+    s.move_to = data.user_data.move_to
+
+    for e in data.entities {
+        last, last_ok := s.state_entities[e.id]
+        if !last_ok {
+            last = game.Entity{}
+        }
+        last.id = e.id
+        delta := e.delta
+        game.implement_entity_delta(&last, &delta)
+        s.state_entities[e.id] = last
+    }
+
+    if data.full_sync {
+        for u32(len(s.projectiles)) < u32(len(data.full_projectiles)) {
+            append(&s.projectiles, game.Projectile{})
+        }
+        for i in 0 ..< len(data.full_projectiles) {
+            p := data.full_projectiles[i]
+            p.active = true
+            s.projectiles[i] = p
+        }
+        for i in len(data.full_projectiles) ..< len(s.projectiles) {
+            s.projectiles[i].active = false
+        }
+        s.projectiles_count = u32(len(data.full_projectiles))
+    } else {
+        for ev in data.projectile_events {
+            switch v in ev.data {
+            case game.SpawnProjectileMsg:
+                p := v.projectile
+                p.active = true
+                for u32(len(s.projectiles)) <= s.projectiles_count {
+                    append(&s.projectiles, game.Projectile{})
+                }
+                s.projectiles[s.projectiles_count] = p
+                s.projectiles_count += 1
+
+            case game.RemoveProjectileMsg:
+                for i in 0 ..< s.projectiles_count {
+                    if s.projectiles[i].id == v.projectile_id {
+                        last := s.projectiles_count - 1
+                        s.projectiles[i] = s.projectiles[last]
+                        s.projectiles[last].active = false
+                        s.projectiles_count -= 1
+                        break
+                    }
+                }
+                // if not found: the spawn+remove happened between two
+                // of our ticks - nothing to do, safe to ignore
+            }
+        }
+    }
+
+    sync.unlock(&s.state_lock)
+}
+
+// --- send_user_ability: build the message through the new union ---
+send_user_ability :: proc(s: ^State, ability_index: u8) {
+    b := game.init_send_message()
+    game.pack_client_message(&b, game.Msg{
+        kind = .USER_MSG,
+        data = game.UserMsg{
+            user_id = ID,
+            kind    = .ABILITY,
+            data    = game.AbilityMsg{
+                user_ability_index = ability_index,
+                direction          = s.pdirection,
+            },
+        },
+    })
+    err := game.send_message(socket = s.socket, endpoint = s.server_endpoint, b = &b)
+    assert(err == .None)
+}
+
+
+// --- receiver_thread: free the per-message temp allocations ---
 receiver_thread :: proc(s: ^State) {
     buf := buffer_io.buffer_make(1024)
     last := time.now()
@@ -413,17 +418,14 @@ receiver_thread :: proc(s: ^State) {
             fmt.println(endpoint)
             panic("received msg from not server")
         }
-        // set buffer size
         buf.len = n
-        // update last packet
         sync.lock(&s.state_lock)
         s.debug_last_packet_size = u32(n)
         sync.unlock(&s.state_lock)
 
-        // hande
         handle_server_msg(s, &buf);
+        free_all(context.temp_allocator)
 
-        // reset
         buffer_io.buffer_reset(&buf)
     }
     panic("Not connected anymore")
@@ -485,6 +487,17 @@ get_ts_src_for_wall :: proc(t:game.Tile, n: game.WallNeighbours) -> string {
     panic("What");
 }
 
+update_projectile_client :: proc(last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
+    p := last_p
+    prev_pos := last_p.position
+    new_pos := prev_pos + raylib.Vector2Normalize(last_p.direction) * last_p.speed * dt
+    p.position = new_pos
+
+    if raylib.Vector2Distance(p.position, last_p.origin) > p.range {
+        return p, true // out of range - client should stop drawing/advancing it
+    }
+    return p, false
+}
 main :: proc() {
     flags : raylib.ConfigFlags
     flags  += {.MSAA_4X_HINT}
@@ -501,8 +514,6 @@ main :: proc() {
     if r != 0 {
         return
     } else if r == 0 {
-        fmt.println("connected");
-        // return;
     }
     t_receiver := thread.create_and_start_with_data(data = &s, fn = thread_receiver_fn)
     s.pings = make(map[u8]time.Time)
@@ -525,7 +536,6 @@ main :: proc() {
     s.gmap = game.new_map();
     target := raylib.LoadRenderTexture(i32(SCREEN_WIDTH) * 4, i32(SCREEN_HEIGHT) * 4) // copy
                                                                                       // main loop
-    fmt.println("odin version:", ODIN_VERSION)
     // for sorted
     sorted := make([dynamic]SortedDrawElement)
     prev_direction := raylib.Vector2{0,0}
@@ -574,6 +584,23 @@ main :: proc() {
         assert(pok)
         s.spref = s.current_entities[ID] // set spref to what player sees
         assert(pok)
+        sync.unlock(&s.state_lock)
+        sync.lock(&s.state_lock)
+        for i in 0 ..< s.projectiles_count {
+            p := s.projectiles[i]
+            if !p.active {
+                continue
+            }
+            updated, done := update_projectile_client(p, dt)
+            if done {
+                // don't remove from the array here - just freeze/hide it client-side;
+                // the server's REMOVE_PROJECTILE event is what actually shrinks
+                // projectiles_count. Marking inactive avoids it visibly overshooting
+                // its range while waiting for that event to arrive.
+                updated.active = false
+            }
+            s.projectiles[i] = updated
+        }
         sync.unlock(&s.state_lock)
         // get player info
         append(&s.logs, "Hello, World!!")
@@ -649,6 +676,8 @@ main :: proc() {
                 allocator = s.frame_arena.block_allocator,
             ),
         )
+
+        slog(&s, "%d projectiles", len(s.projectiles))
         // update camera
         s.camera.x = s.spref.body.x - SCREEN_WIDTH / 2 + pref.body.width / 2
         s.camera.y = s.spref.body.y - SCREEN_HEIGHT / 2 + pref.body.height / 2
@@ -662,7 +691,15 @@ main :: proc() {
                 c := o
                 draw_entity(&s, s.camera, &c);
             }
+        }// --- draw projectiles ---
+        sync.lock(&s.state_lock)
+        for i in 0 ..< s.projectiles_count {
+            p := s.projectiles[i]
+            if p.active {
+                draw_projectile(&s, &p)
+            }
         }
+        sync.unlock(&s.state_lock)
         // draw game first
         if false {
             if s.debug {     // normal view with flush 2
@@ -698,7 +735,6 @@ main :: proc() {
             h: f32 = f32(len(s.logs) * 24 + 10 + 20)
             draw_rect_no_scale(&s, pos = {0, 0}, size = {SCREEN_WIDTH, h}, tint = {0, 0, 0, 123})
             for l in s.logs {
-                // fmt.println(l)
                 cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator)
                 draw_text_no_scale(
                     &s,
@@ -717,15 +753,15 @@ main :: proc() {
         // draw to big canvas
 
         flush_draws(&s)
+        raylib.DrawLineV({SCREEN_WIDTH/2, SCREEN_HEIGHT/2}, {SCREEN_WIDTH/2, SCREEN_HEIGHT/2} + 100*s.pdirection, raylib.WHITE)
         raylib.EndDrawing()
 
         i += 1
         if i % 60 == 0 {
             i = 0
             s.pings[ping_id] = time.now()
-            // fmt.println("ping", ping_id, time.now())
             b := game.init_send_message()
-            game.pack_client_message(&b, {kind=.PING, ping={user_id=ID, id=u32(ping_id)}});
+            game.pack_client_message(&b, {kind=.PING, data=game.PingMsg{user_id=ID, id=u32(ping_id)}});
             err := game.send_message(s.socket, s.server_endpoint, &b)
             if err != .None {
                 fmt.println(err)
