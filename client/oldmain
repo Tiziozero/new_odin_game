@@ -1,0 +1,288 @@
+main :: proc() {
+    flags : raylib.ConfigFlags
+    flags  += {.MSAA_4X_HINT}
+    raylib.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Hellope!")
+    defer raylib.CloseWindow();
+    raylib.SetTargetFPS(60)
+    s := State{}
+    // raylib.SetConfigFlags(flags);
+    tiles = raylib.LoadTexture("imgs/ts9.png")
+    s.debug = true
+    s.assets = game.load_assets("imgs.json", load=true)
+
+    r :=init_game_con(&s) 
+    if r != 0 {
+        return
+    } else if r == 0 {
+    }
+    t_receiver := thread.create_and_start_with_data(data = &s, fn = thread_receiver_fn)
+    s.pings = make(map[u8]time.Time)
+
+
+    spref, pok := s.state_entities[ID]
+    if !pok {
+        panic("no player in entities")
+    }
+
+    events: [dynamic]InputEvent
+    mem.dynamic_arena_init(&s.frame_arena)
+    f := raylib.LoadFont("font.ttf")
+    s.camera = raylib.Rectangle {
+        width  = SCALED_SCREEN_WIDTH(),
+        height = SCALED_SCREEN_HEIGHT(),
+    }
+    i := 0
+    ping_id: u8 = 0
+    s.gmap = game.new_map();
+    target := raylib.LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT) // copy
+    shader := raylib.LoadShader(nil, strings.clone_to_cstring("fragment.fs"));
+                                                                                      // main loop
+    // for sorted
+    sorted := make([dynamic]SortedDrawElement)
+    prev_direction := raylib.Vector2{0,0}
+    for !raylib.WindowShouldClose() && s.connected {
+        dt := raylib.GetFrameTime()
+        rl_to_game(&events) // events
+        mp := raylib.GetMousePosition()
+        pdirection := mp - {SCREEN_WIDTH,SCREEN_HEIGHT}/2;
+        if pdirection != prev_direction {
+            s.pdirection = pdirection
+            // send
+            // b := game.init_send_message();
+            // game.send_message(s.socket, s.server_endpoint, &b)
+        }
+        // copy entities
+        // clear_map(&s.current_entities)
+        sync.lock(&s.state_lock)
+        other: [1024]game.Entity
+        j := 0
+        for k, e in s.state_entities {
+            copy := e
+            other[j]=e
+            j+=1
+            current, ok := s.current_entities[k]
+            if !ok {
+                fmt.println("New entity from server:", e)
+            } else {
+                new_pos: raylib.Vector2
+                // lerp positions
+                p1 := game.rect_pos(current.body)
+                p2 := game.rect_pos(copy.body)
+                if raylib.Vector2Distance(p1, p2) > game.ENTITY_SPEED * dt {
+                    d := raylib.Vector2Normalize(p2 - p1)
+                    s :f32 = game.ENTITY_SPEED
+                    new_pos = p1 + d* s * dt
+                } else {
+                    // copy body over
+                    new_pos = p2
+                }
+                copy.body.x = new_pos.x
+                copy.body.y = new_pos.y
+            }
+            s.current_entities[k] = copy
+        }
+        pref, pok := s.state_entities[ID] // set to server entity
+        assert(pok)
+        s.spref = s.current_entities[ID] // set spref to what player sees
+        assert(pok)
+        sync.unlock(&s.state_lock)
+        sync.lock(&s.state_lock)
+        for i in 0 ..< s.projectiles_count {
+            p := s.projectiles[i]
+            if !p.active {
+                continue
+            }
+            updated, done := update_projectile_client(p, dt)
+            if done {
+                // don't remove from the array here - just freeze/hide it client-side;
+                // the server's REMOVE_PROJECTILE event is what actually shrinks
+                // projectiles_count. Marking inactive avoids it visibly overshooting
+                // its range while waiting for that event to arrive.
+                updated.active = false
+            }
+            s.projectiles[i] = updated
+        }
+        sync.unlock(&s.state_lock)
+        // get player info
+        append(&s.logs, "Hello, World!!")
+        append(&s.logs, "Debug logs:")
+        slog(&s, "Last packet size: %d", s.debug_last_packet_size);
+        append(&s.logs, "events!")
+        append(&s.logs, fmt.aprintf("ID: %d", ID))
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "pos  :%.0f %.0f",
+                s.spref.body.x,
+                s.spref.body.y,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "spos       :%.0f %.0f",
+                pref.body.x,
+                pref.body.y,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "s state pos:%.0f %.0f",
+                s.spref.body.x,
+                s.spref.body.y,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf("ping? :%.5f", s.ping, allocator = s.frame_arena.block_allocator),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf("move_to: %.0f:%.0f", s.move_to.x, s.move_to.y, allocator = s.frame_arena.block_allocator),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf("energy: %.0f", s.energy, allocator = s.frame_arena.block_allocator),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "view :%d",
+                int(s.debug) + 0,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "snap :%d",
+                int(bool_snap) + 0,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+        for &k in events {
+            handle_input(&k, &s)
+        }
+
+        append(
+            &s.logs,
+            fmt.aprintf(
+                "cam size: :%.3f:%.3f",
+                s.camera.width,
+                s.camera.height,
+                allocator = s.frame_arena.block_allocator,
+            ),
+        )
+
+        slog(&s, "%d projectiles", len(s.projectiles))
+        // update camera
+        s.camera.x = s.spref.body.x - SCREEN_WIDTH / 2 + pref.body.width / 2
+        s.camera.y = s.spref.body.y - SCREEN_HEIGHT / 2 + pref.body.height / 2
+        // not since all draw calls are scaled
+        s.camera.width = SCALED_SCREEN_WIDTH()
+        s.camera.height = SCALED_SCREEN_HEIGHT()
+
+        draw_game(&s, pref, &sorted)
+        if s.debug {
+            for o in other[:j] {
+                c := o
+                draw_entity(&s, s.camera, &c);
+            }
+        }// --- draw projectiles ---
+        sync.lock(&s.state_lock)
+        for i in 0 ..< s.projectiles_count {
+            p := s.projectiles[i]
+            if p.active {
+                draw_projectile(&s, &p)
+            }
+        }
+        sync.unlock(&s.state_lock)
+        // draw game first
+        if false {
+            if s.debug {     // normal view with flush 2
+                raylib.BeginTextureMode(target)
+                raylib.ClearBackground(raylib.PURPLE)
+                flush_draws(&s)
+                raylib.EndTextureMode()
+                raylib.BeginDrawing()
+                // uses top left quarter and draws that (actually bottom left? inversion and what not)
+                src := raylib.Rectangle{0, 3 * SCREEN_HEIGHT, SCREEN_WIDTH, -SCREEN_HEIGHT} // flipped Y
+                dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
+                raylib.BeginShaderMode(shader);
+                raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
+                raylib.EndShaderMode();
+            } else {     // draw 1 whole screen
+                raylib.BeginTextureMode(target)
+                raylib.ClearBackground(raylib.PURPLE)
+                flush_draws(&s)
+                raylib.EndTextureMode()
+                raylib.BeginDrawing()
+                src := raylib.Rectangle{0, 0, SCREEN_WIDTH * 4, -SCREEN_HEIGHT * 4} // flipped Y
+                dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
+                raylib.BeginShaderMode(shader);
+                raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
+                raylib.EndShaderMode();
+            }
+        }
+        // bother later
+        flush_draws_scale(&s)
+        if raylib.Vector2Distance(game.rect_pos(s.spref.body), s.move_to) > 0.5 {
+            draw_rect(&s, apply_camera(&s, s.move_to)+game.rect_size(s.spref.body)/2, raylib.Vector2{2,2});
+        } else {
+        }
+        // draw UI
+        if s.debug {// i here conflicts with ping i
+            i: i32 = 0
+            h: f32 = f32(len(s.logs) * 24 + 10 + 20)
+            draw_rect_no_scale(&s, pos = {0, 0}, size = {SCREEN_WIDTH, h}, tint = {0, 0, 0, 123})
+            for l in s.logs {
+                cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator)
+                draw_text_no_scale(
+                    &s,
+                    l,
+                    pos = raylib.Vector2{10, f32(10 + 24 * i)},
+                    size = 24,
+                    font = f,
+                )
+                /*raylib.DrawTextEx(f, cstr,
+                  raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);*/
+                i += 1
+            }
+        }
+        // draw everything at 1:1 pixel scale
+
+        // draw to big canvas
+
+        flush_draws(&s)
+
+
+        raylib.EndDrawing()
+
+        i += 1
+        if i % 60 == 0 {
+            i = 0
+            s.pings[ping_id] = time.now()
+            b := game.init_send_message()
+            game.pack_client_message(&b, {kind=.PING, data=game.PingMsg{user_id=ID, id=u32(ping_id)}});
+            err := game.send_message(s.socket, s.server_endpoint, &b)
+            if err != .None {
+                fmt.println(err)
+                panic("Err in ping")
+            }
+            ping_id += 1
+        }
+        state_loop(&s)
+        clear(&events)
+    }
+    s.connected = false
+    raylib.UnloadFont(f)
+    raylib.CloseWindow()
+    thread.join(t_receiver)
+    net.close(s.socket)
+    // init game state
+}
+

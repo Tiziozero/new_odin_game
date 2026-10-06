@@ -534,13 +534,18 @@ main :: proc() {
     i := 0
     ping_id: u8 = 0
     s.gmap = game.new_map();
-    target := raylib.LoadRenderTexture(i32(SCREEN_WIDTH) * 4, i32(SCREEN_HEIGHT) * 4) // copy
+    target := raylib.LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT) // copy
+    shader := raylib.LoadShader(nil, strings.clone_to_cstring("fragment.fs"));
                                                                                       // main loop
     // for sorted
     sorted := make([dynamic]SortedDrawElement)
     prev_direction := raylib.Vector2{0,0}
+    timeLoc := raylib.GetShaderLocation(shader, "time");
+    t :f32= 0.0;
     for !raylib.WindowShouldClose() && s.connected {
         dt := raylib.GetFrameTime()
+        t += dt;
+        raylib.SetShaderValue( shader, timeLoc, &t, .FLOAT);
         rl_to_game(&events) // events
         mp := raylib.GetMousePosition()
         pdirection := mp - {SCREEN_WIDTH,SCREEN_HEIGHT}/2;
@@ -700,31 +705,17 @@ main :: proc() {
             }
         }
         sync.unlock(&s.state_lock)
+
         // draw game first
-        if false {
-            if s.debug {     // normal view with flush 2
-                raylib.BeginTextureMode(target)
-                raylib.ClearBackground(raylib.PURPLE)
-                flush_draws(&s)
-                raylib.EndTextureMode()
-                raylib.BeginDrawing()
-                // uses top left quarter and draws that (actually bottom left? inversion and what not)
-                src := raylib.Rectangle{0, 3 * SCREEN_HEIGHT, SCREEN_WIDTH, -SCREEN_HEIGHT} // flipped Y
-                dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
-                raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
-            } else {     // draw 1 whole screen
-                raylib.BeginTextureMode(target)
-                raylib.ClearBackground(raylib.PURPLE)
-                flush_draws(&s)
-                raylib.EndTextureMode()
-                raylib.BeginDrawing()
-                src := raylib.Rectangle{0, 0, SCREEN_WIDTH * 4, -SCREEN_HEIGHT * 4} // flipped Y
-                dest := raylib.Rectangle{0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}
-                raylib.DrawTexturePro(target.texture, src, dest, {0, 0}, 0, raylib.WHITE)
-            }
-        }
-        // bother later
+        raylib.BeginTextureMode(target);
         flush_draws_scale(&s)
+        raylib.EndTextureMode();
+        raylib.BeginDrawing()
+        raylib.BeginShaderMode(shader);
+        raylib.DrawTextureRec(target.texture, raylib.Rectangle{0, 0, SCREEN_WIDTH, -SCREEN_HEIGHT}, raylib.Vector2{0, 0}, raylib.WHITE);
+        raylib.EndShaderMode();
+
+
         if raylib.Vector2Distance(game.rect_pos(s.spref.body), s.move_to) > 0.5 {
             draw_rect(&s, apply_camera(&s, s.move_to)+game.rect_size(s.spref.body)/2, raylib.Vector2{2,2});
         } else {
@@ -753,7 +744,8 @@ main :: proc() {
         // draw to big canvas
 
         flush_draws(&s)
-        raylib.DrawLineV({SCREEN_WIDTH/2, SCREEN_HEIGHT/2}, {SCREEN_WIDTH/2, SCREEN_HEIGHT/2} + 100*s.pdirection, raylib.WHITE)
+
+
         raylib.EndDrawing()
 
         i += 1
