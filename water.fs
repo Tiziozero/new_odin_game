@@ -28,7 +28,7 @@ void main()
     vec2 cell = floor(px / TILE) * TILE;
 
     // horizontal wobble (your old effect), driven by world y
-    px.x += sin(world.y * 0.1 + time * 2.0) * 2.0;
+    px.x += sin(world.y * 0.1 + time * 2.0) * 2.0*0.3;
     px = clamp(px, cell + 0.5, cell + TILE - 0.5);
 
     vec4 col = texture(texture0, px / atlas_size) * fragColor * colDiffuse;

@@ -229,7 +229,14 @@ update_water_uniforms :: proc(s: ^State) {
 bool_snap := false
 snap_f32 :: proc(v: f32) -> f32 { if bool_snap { return math.round(v) } else { return v } }
 snap_v2 :: proc(v: raylib.Vector2) -> raylib.Vector2 { return {snap(v.x), snap(v.y)} }
-snap_rect :: proc(v: raylib.Rectangle) -> raylib.Rectangle { return {snap(v.x), snap(v.y), snap(v.width), snap(v.height)} }
+snap_rect :: proc(v: raylib.Rectangle) -> raylib.Rectangle {
+    if !bool_snap { return v }
+    x0 := math.round(v.x)
+    y0 := math.round(v.y)
+    x1 := math.round(v.x + v.width)
+    y1 := math.round(v.y + v.height)
+    return {x0, y0, x1 - x0, y1 - y0}
+}
 snap :: proc {
     snap_f32,
     snap_v2,

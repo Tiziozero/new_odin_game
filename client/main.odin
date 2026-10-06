@@ -1,7 +1,7 @@
 // client.odin
 package main
 
-SCREEN_FACTOR := f32(2.0)
+SCREEN_FACTOR := f32(1.50)
 MIN_ODIN :: "dev-2026-06"
 
 when ODIN_VERSION < MIN_ODIN {
