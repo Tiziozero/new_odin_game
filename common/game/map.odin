@@ -9,7 +9,9 @@ v2i :: struct { x, y: int }
 Map :: struct {
     map_arena: mem.Dynamic_Arena,
     items: [dynamic]MapItem,
-    chunks: map[v2i]Chunk,
+    // Chunks are ~64KB each and live behind a pointer: a ^Chunk handed out by
+    // map_get_chunk stays valid even when generating another chunk grows the map.
+    chunks: map[v2i]^Chunk,
     seed: int,
     octaves: int,
 }
@@ -21,17 +23,22 @@ Biom :: enum {
     Land,
     Mountain,
 }
+
+// One source of truth for the thresholds (biome and wall checks used to disagree at == 0.7).
+WATER_ELEVATION :: 0.4
+WALL_ELEVATION  :: 0.7
+
 new_map :: proc(seed := 420, octaves := 8) -> Map {
     m := Map{}
     mem.dynamic_arena_init(&m.map_arena)
-    m.chunks = make(map[v2i]Chunk)
+    m.chunks = make(map[v2i]^Chunk)
     m.seed = seed
     m.octaves = octaves
     return m
 }
 get_biom :: proc(elevation, moisture, temperature: f32) -> Biom {
-    if elevation < 0.2 { return .Water }
-    if elevation > 0.7 { return .Mountain }
+    if elevation < WATER_ELEVATION { return .Water }
+    if elevation >= WALL_ELEVATION { return .Mountain }
     return .Land
 }
 Tile :: struct {
@@ -71,32 +78,32 @@ Chunk :: struct {
     drawables: [dynamic]Drawable,
 }
 generate_chunck :: proc(m: ^Map, x, y: int) {
-    if x > 10 || y > 10 {
-        panic("coords are wrong?")
-    }
-    if x < -10 || y < -10 {
-        panic("coords are wrong?")
-    }
+    // (the old |x|,|y| > 10 panics are gone: the noise is infinite, and the
+    // draw code asks for the neighbours of the player's chunk, so walking to
+    // the edge of the old limit would have crashed the game.)
+    alloc := mem.dynamic_arena_allocator(&m.map_arena)
     tile_x := x * CHUNK_SIZE
     tile_y := y * CHUNK_SIZE
-    chunk := Chunk{}
-    chunk.cid = {x,y}
-    chunk.collidables = make([dynamic]Collidable, allocator=m.map_arena.block_allocator)
-    chunk.drawables = make([dynamic]Drawable, allocator=m.map_arena.block_allocator)
+    chunk := new(Chunk, alloc)
+    chunk.cid = {x, y}
+    chunk.collidables = make([dynamic]Collidable, 0, 64, alloc)
+    chunk.drawables   = make([dynamic]Drawable, 0, 128, alloc)
     for j in 0..<CHUNK_SIZE { // row/y
         for i in 0..<CHUNK_SIZE { // col/x
-            x :=f32((tile_x + i)*TILES_SIZE)
-            y :=f32((tile_y + j)*TILES_SIZE )
+            wx := tile_x + i
+            wy := tile_y + j
+            px := f32(wx * TILES_SIZE)
+            py := f32(wy * TILES_SIZE)
             trect := raylib.Rectangle{
-                    x=x, y=y, width=TILES_SIZE, height=TILES_SIZE,
-                };
+                x=px, y=py, width=TILES_SIZE, height=TILES_SIZE,
+            }
             t := Tile{}
-            t.rect = trect;
-            t.elevation = tile_elevation(m, tile_x+i, tile_y+j);
-            t.temp = tile_temp(m, tile_x+i, tile_y+j);
-            t.moisture = tile_moisture(m, tile_x+i, tile_y+j);
+            t.rect = trect
+            t.elevation = tile_elevation(m, wx, wy)
+            t.temp = tile_temp(m, wx, wy)
+            t.moisture = tile_moisture(m, wx, wy)
             if tile_is_wall(t.elevation) {
-                t.wall_neighbours = wall_neighbours_for(m,tile_x + i, tile_y + j)
+                t.wall_neighbours = wall_neighbours_for(m, wx, wy)
                 append(&chunk.collidables, Collidable{
                     rect=trect,
                 })
@@ -104,16 +111,16 @@ generate_chunck :: proc(m: ^Map, x, y: int) {
                 append(&chunk.drawables, WallDrawable{
                     rect=trect,
                     wall_neighbours=t.wall_neighbours,
-                    src_rect = get_ts_src_for_wall({x=x,y=y},t.wall_neighbours)
+                    src_rect = get_ts_src_for_wall({x=px,y=py}, t.wall_neighbours),
                 })
             }
-            t.biom = get_biom(t.elevation, t.moisture, t.temp);
+            t.biom = get_biom(t.elevation, t.moisture, t.temp)
             t.src_rect = get_ts_src_for_tile(t)
-            chunk.tiles[j][i] = t;
+            chunk.tiles[j][i] = t
         }
     }
-    gen_chunk_items(m, &chunk);
-    m.chunks[v2i{x,y}] = chunk;
+    gen_chunk_items(m, chunk)
+    m.chunks[v2i{x,y}] = chunk
 }
 chunk_rand :: proc(cid: v2i, salt: int) -> int {
     h := u32(2166136261) // FNV offset basis
@@ -126,34 +133,43 @@ chunk_rand :: proc(cid: v2i, salt: int) -> int {
     return int(h)
 }
 new_random_map_item :: proc(m: ^Map, c: ^Chunk, x, y: int) {
+    wx := c.cid.x*CHUNK_SIZE + x
+    wy := c.cid.y*CHUNK_SIZE + y
     item := RockDrawable{}
-    item.src_rect = rock if int(10*fbm_xyos(f32(x),f32(y),m.octaves, m.seed*x*y)) % 2 == 0 else rock_2;
-    item.x = f32(c.cid.x*CHUNK_SIZE+x) * TILES_SIZE
-    item.y = f32(c.cid.y*CHUNK_SIZE+y) * TILES_SIZE
+    // was fbm at integer coords with seed*x*y: constant for gradient noise, and
+    // seed 0 whenever x or y was 0. A hash of the world tile is what's wanted here.
+    item.src_rect = rock if tile_hash(wx, wy, m.seed) % 2 == 0 else rock_2
+    item.x = f32(wx * TILES_SIZE)
+    item.y = f32(wy * TILES_SIZE)
     item.width = TILES_SIZE
     item.height = TILES_SIZE
-    append(&c.drawables, item);
+    append(&c.drawables, item)
     c_rect := Collidable{rect=item.rect}
-    append(&c.collidables, c_rect);
+    append(&c.collidables, c_rect)
 }
 gen_chunk_items :: proc(m: ^Map, c: ^Chunk) {
-    for i in 0..<int(20*fbm_xyos(f32(c.cid.x), f32(c.cid.y),m.octaves, m.seed)) {
-        x := chunk_rand(c.cid, 67*i)%CHUNK_SIZE;
-        y := chunk_rand(c.cid, 69*i)%CHUNK_SIZE;
-           k := 0
-        for c.tiles[y][x].occupied && k < 20 {
-            x = chunk_rand(c.cid, 67)%CHUNK_SIZE;
-            y = chunk_rand(c.cid, 69)%CHUNK_SIZE;
-            k+=1
+    // +0.5: sampling noise exactly on integer lattice points tends to return a flat value
+    density := fbm_xyos(f32(c.cid.x) + 0.5, f32(c.cid.y) + 0.5, m.octaves, m.seed)
+    count := int(20 * density)
+    for i in 0..<count {
+        for k in 0..<20 {
+            // salt includes k: retrying used to roll the exact same tile every time
+            x := chunk_rand(c.cid, 67 * (i + 1) + 1000 * k) % CHUNK_SIZE
+            y := chunk_rand(c.cid, 69 * (i + 1) + 1000 * k) % CHUNK_SIZE
+            tile := &c.tiles[y][x]
+            if tile.occupied || tile.biom == .Water { continue }
+            tile.occupied = true // so two rocks can't share a tile
+            new_random_map_item(m, c, x, y)
+            break
         }
-        new_random_map_item(m, c, x, y);
-        
     }
 }
-ltr := raylib.Rectangle{0, 0, 16, 16}
-lt := raylib.Rectangle{16 ,0, 16, 16}
-rt := raylib.Rectangle{2*16, 0, 16, 16}
-t := raylib.Rectangle{3*16, 0, 16, 16}
+
+// Atlas rects. Renamed from ltr/lt/rt/t: a package-level `t` is begging to be shadowed.
+wall_ltr := raylib.Rectangle{0, 0, 16, 16}
+wall_lt  := raylib.Rectangle{16 ,0, 16, 16}
+wall_rt  := raylib.Rectangle{2*16, 0, 16, 16}
+wall_top := raylib.Rectangle{3*16, 0, 16, 16}
 grount_t_1 := raylib.Rectangle{0, 16, 16, 16}
 grount_t_2 := raylib.Rectangle{1*16, 16, 16, 16}
 grount_t_3 := raylib.Rectangle{2*16, 16, 16, 16}
@@ -174,6 +190,8 @@ water_11 := raylib.Rectangle{0*16, 5*16, 16, 16}
 water_12 := raylib.Rectangle{1*16, 5*16, 16, 16}
 water_13 := raylib.Rectangle{2*16, 5*16, 16, 16}
 water_14 := raylib.Rectangle{3*16, 5*16, 16, 16}
+// TODO(check atlas): water_21..24 are byte-for-byte copies of water_11..14 (row 5).
+// If they were meant to be row 6, change the y here; I left it since I can't see the atlas.
 water_21 := raylib.Rectangle{0*16, 5*16, 16, 16}
 water_22 := raylib.Rectangle{1*16, 5*16, 16, 16}
 water_23 := raylib.Rectangle{2*16, 5*16, 16, 16}
@@ -181,7 +199,8 @@ water_24 := raylib.Rectangle{3*16, 5*16, 16, 16}
 rock := raylib.Rectangle{0, 112, 16,16}
 rock_2 := raylib.Rectangle{16, 112, 16,16}
 tile_hash :: proc(x, y, seed: int) -> u32 {
-    h := u32(seed)
+    itseed := 420 + 2;
+    h := u32(itseed)
     h ~= u32(x) * 0x85ebca6b
     h ~= u32(y) * 0xc2b2ae35
 
@@ -194,8 +213,10 @@ tile_hash :: proc(x, y, seed: int) -> u32 {
     return h
 }
 
+// NOTE: 10 variants -> x offsets up to 9*16, but only grount_t_1..4 (4 columns) are
+// declared above. Fine if the atlas row really has 10 tiles; otherwise use % 4.
 random_ground_tile :: proc(x,y,s:int) -> raylib.Rectangle {
-    return { f32(tile_hash(x, y, s) % 10) * 16, 16, 16, 16 } 
+    return { f32(tile_hash(x, y, s) % 10) * 16, 16, 16, 16 }
 }
 random_snow_tile :: proc(x,y,s:int) -> raylib.Rectangle {
     switch tile_hash(x, y, s) % 4 {
@@ -249,31 +270,27 @@ get_ts_src_for_wall :: proc(_t:Tile, n: WallNeighbours) ->raylib.Rectangle {
     switch n {
     case {.West,.East}:fallthrough
     case {.North,.West,.East}:
-        return ltr
+        return wall_ltr
     case {.East}:fallthrough
     case {.North,.East}:
-        return lt
+        return wall_lt
     case {.West}:fallthrough
     case {.North,.West}:
-        return rt
+        return wall_rt
     case {.North}: fallthrough
-    case {}: return t
+    case {}: return wall_top
     case: fmt.println(n); panic("handle case for walls");
     }
     fmt.println(n);
     panic("What");
 }
 map_get_chunk :: proc(m :^Map, i: v2i) -> ^Chunk {
-    c, ok := &m.chunks[i];
-    if !ok {
-        fmt.println("generating chunk:", i)
-        generate_chunck(m, i.x,i.y)
-        c, ok = &m.chunks[i]
-        if !ok {
-            panic("Failed to gen chunk")
-        }
+    if c, ok := m.chunks[i]; ok {
+        return c
     }
-    return c;
+    fmt.println("generating chunk:", i)
+    generate_chunck(m, i.x, i.y)
+    return m.chunks[i]
 }
 tile_elevation :: proc(m: ^Map, tile_x, tile_y: int) -> f32 {
     f := fbm_xyos(
@@ -301,8 +318,10 @@ fbm_xyos :: proc(x,y: f32, o, s: int) -> f32 {
     return 0.5*(seeded_fbm(x, y, o, s)+1)
 }
 tile_is_wall :: proc(index: f32) -> bool {
-    return index >= 0.7
+    return index >= WALL_ELEVATION
 }
+// Perf note: this re-samples 8-octave noise 4x per wall tile; if chunk generation
+// hitches, compute the elevations for the chunk (+1 tile border) once and reuse them.
 wall_neighbours_for :: proc(m: ^Map, tile_x, tile_y: int) -> WallNeighbours {
     neighbours := WallNeighbours{}
 

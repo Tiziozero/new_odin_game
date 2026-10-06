@@ -11,7 +11,6 @@ when ODIN_VERSION < MIN_ODIN {
 import "core:fmt"
 import "core:mem"
 import "core:net"
-import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
@@ -75,13 +74,15 @@ State :: struct {
     camera:             raylib.Rectangle,
     assets:             game.AssetManger,
     frame_arena:        mem.Dynamic_Arena,
-    logs:               [dynamic]string,
+    logs:               [dynamic]string,   // unbounded: cap or ring-buffer it
     socket:             net.UDP_Socket,
     connected:          bool,
     server_endpoint:    net.Endpoint,
     ping:               f32,
     pings:              map[u8]time.Time,
-    draws:              [dynamic]DrawCommand,
+    layer:              Layer,                       // where draw_* currently queues
+    layers:             [Layer][dynamic]DrawCommand, // replaces `draws`
+    water:              WaterShader,
     gmap:               game.Map,
     debug:              bool,
     move_to:            raylib.Vector2,
@@ -535,17 +536,14 @@ main :: proc() {
     ping_id: u8 = 0
     s.gmap = game.new_map();
     target := raylib.LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT) // copy
-    shader := raylib.LoadShader(nil, strings.clone_to_cstring("fragment.fs"));
-                                                                                      // main loop
+    init_water_shader(&s, tiles);
     // for sorted
     sorted := make([dynamic]SortedDrawElement)
     prev_direction := raylib.Vector2{0,0}
-    timeLoc := raylib.GetShaderLocation(shader, "time");
     t :f32= 0.0;
     for !raylib.WindowShouldClose() && s.connected {
         dt := raylib.GetFrameTime()
         t += dt;
-        raylib.SetShaderValue( shader, timeLoc, &t, .FLOAT);
         rl_to_game(&events) // events
         mp := raylib.GetMousePosition()
         pdirection := mp - {SCREEN_WIDTH,SCREEN_HEIGHT}/2;
@@ -607,67 +605,8 @@ main :: proc() {
             s.projectiles[i] = updated
         }
         sync.unlock(&s.state_lock)
+        debug_log(&s, pref);
         // get player info
-        append(&s.logs, "Hello, World!!")
-        append(&s.logs, "Debug logs:")
-        slog(&s, "Last packet size: %d", s.debug_last_packet_size);
-        append(&s.logs, "events!")
-        append(&s.logs, fmt.aprintf("ID: %d", ID))
-        append(
-            &s.logs,
-            fmt.aprintf(
-                "pos  :%.0f %.0f",
-                s.spref.body.x,
-                s.spref.body.y,
-                allocator = s.frame_arena.block_allocator,
-            ),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf(
-                "spos       :%.0f %.0f",
-                pref.body.x,
-                pref.body.y,
-                allocator = s.frame_arena.block_allocator,
-            ),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf(
-                "s state pos:%.0f %.0f",
-                s.spref.body.x,
-                s.spref.body.y,
-                allocator = s.frame_arena.block_allocator,
-            ),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf("ping? :%.5f", s.ping, allocator = s.frame_arena.block_allocator),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf("move_to: %.0f:%.0f", s.move_to.x, s.move_to.y, allocator = s.frame_arena.block_allocator),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf("energy: %.0f", s.energy, allocator = s.frame_arena.block_allocator),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf(
-                "view :%d",
-                int(s.debug) + 0,
-                allocator = s.frame_arena.block_allocator,
-            ),
-        )
-        append(
-            &s.logs,
-            fmt.aprintf(
-                "snap :%d",
-                int(bool_snap) + 0,
-                allocator = s.frame_arena.block_allocator,
-            ),
-        )
         for &k in events {
             handle_input(&k, &s)
         }
@@ -707,26 +646,39 @@ main :: proc() {
         sync.unlock(&s.state_lock)
 
         // draw game first
-        raylib.BeginTextureMode(target);
+        /* raylib.BeginTextureMode(target); // old
         flush_draws_scale(&s)
         raylib.EndTextureMode();
         raylib.BeginDrawing()
         raylib.BeginShaderMode(shader);
         raylib.DrawTextureRec(target.texture, raylib.Rectangle{0, 0, SCREEN_WIDTH, -SCREEN_HEIGHT}, raylib.Vector2{0, 0}, raylib.WHITE);
-        raylib.EndShaderMode();
+        raylib.EndShaderMode(); */
+        // fancy, new drawing
+        // world was queued earlier by draw_game (Terrain / Effects / Objects)
+        update_water_uniforms(&s)
 
+        // draw game first
+        raylib.BeginTextureMode(target)
+        raylib.ClearBackground(raylib.BLACK)
+        flush_layer(&s, .Terrain)
+        flush_layer(&s, .Effects)
+        flush_layer(&s, .Objects)
+        raylib.EndTextureMode()
 
+        raylib.BeginDrawing()
+        // no BeginShaderMode here anymore; the water shader runs per tile inside flush_layer
+        raylib.DrawTextureRec(target.texture, raylib.Rectangle{0, 0, SCREEN_WIDTH, -SCREEN_HEIGHT}, raylib.Vector2{0, 0}, raylib.WHITE)
+
+        s.layer = .UI // everything queued from here goes to the screen pass
         if raylib.Vector2Distance(game.rect_pos(s.spref.body), s.move_to) > 0.5 {
             draw_rect(&s, apply_camera(&s, s.move_to)+game.rect_size(s.spref.body)/2, raylib.Vector2{2,2});
-        } else {
         }
         // draw UI
-        if s.debug {// i here conflicts with ping i
+        if s.debug {
             i: i32 = 0
             h: f32 = f32(len(s.logs) * 24 + 10 + 20)
             draw_rect_no_scale(&s, pos = {0, 0}, size = {SCREEN_WIDTH, h}, tint = {0, 0, 0, 123})
             for l in s.logs {
-                cstr, err := strings.clone_to_cstring(l, s.frame_arena.block_allocator)
                 draw_text_no_scale(
                     &s,
                     l,
@@ -734,17 +686,12 @@ main :: proc() {
                     size = 24,
                     font = f,
                 )
-                /*raylib.DrawTextEx(f, cstr,
-                  raylib.Vector2{10, f32(10 + 24*i)}, 24, 2, raylib.WHITE);*/
                 i += 1
             }
         }
-        // draw everything at 1:1 pixel scale
 
-        // draw to big canvas
-
-        flush_draws(&s)
-
+        flush_layer(&s, .UI)
+        s.layer = .Objects // so next frame's queuing doesn't start on .UI
 
         raylib.EndDrawing()
 
@@ -769,5 +716,4 @@ main :: proc() {
     raylib.CloseWindow()
     thread.join(t_receiver)
     net.close(s.socket)
-    // init game state
 }
