@@ -1023,8 +1023,7 @@ ProjectileOutcome :: enum {
 // any hit. For every outcome other than .Flying the projectile should be
 // removed; on a hit its position is the impact point, and its `id` is still
 // valid for the REMOVE_PROJECTILE event.
-update_projectile :: proc(
-    sp: ^Space, last_p: game.Projectile, dt: f32,
+update_projectile :: proc(sp: ^Space, last_p: game.Projectile, dt: f32,
 ) -> (p: game.Projectile, outcome: ProjectileOutcome, hit: game.EntityHandle) {
     p = last_p
     from := last_p.position

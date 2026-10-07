@@ -63,6 +63,7 @@ State :: struct {
     player_handle:      int,
     spref:              game.Entity,
     pdirection:         raylib.Vector2, // direction player's looking at
+    mpos:               raylib.Vector2, // mouse pos in window pixels
     state_lock:         sync.Mutex,
     // server entities
     state_entities:     map[game.EntityHandle]game.Entity,
@@ -178,6 +179,60 @@ SCALED_SCREEN_HEIGHT :: proc() -> f32 {
     return f32(SCREEN_HEIGHT) / f32(SCREEN_FACTOR)
 }
 
+// ---------------------------------------------------------------------
+// Screen <-> world conversion
+//
+// "screen" = window pixels (what GetMousePosition returns).
+// "world"  = game coordinates (what entity bodies / the server use).
+//
+// Zoom is centered on the player: the middle of the player's body always
+// sits at the middle of the screen, and everything else is scaled around
+// that point by SCREEN_FACTOR:
+//
+//   screen = screen_center + (world - view_center) * SCREEN_FACTOR
+//   world  = view_center   + (screen - screen_center) / SCREEN_FACTOR
+//
+// Use these instead of hand-rolled math so a zoom change can't desync
+// mouse hit-testing from what's drawn.
+// ---------------------------------------------------------------------
+
+screen_center :: proc() -> raylib.Vector2 {
+    return raylib.Vector2{SCREEN_WIDTH, SCREEN_HEIGHT} * 0.5
+}
+
+// World point that is currently drawn at the middle of the screen: the
+// center of the (interpolated) player body, same entity the camera follows.
+view_center_world :: proc(s: ^State) -> raylib.Vector2 {
+    return game.rect_pos(s.spref.body) + game.rect_size(s.spref.body) * 0.5
+}
+
+screen_to_world :: proc(s: ^State, p: raylib.Vector2) -> raylib.Vector2 {
+    return view_center_world(s) + (p - screen_center()) / SCREEN_FACTOR
+}
+
+world_to_screen :: proc(s: ^State, p: raylib.Vector2) -> raylib.Vector2 {
+    return screen_center() + (p - view_center_world(s)) * SCREEN_FACTOR
+}
+
+screen_to_world_rect :: proc(s: ^State, r: raylib.Rectangle) -> raylib.Rectangle {
+    pos := screen_to_world(s, raylib.Vector2{r.x, r.y})
+    return {pos.x, pos.y, r.width / SCREEN_FACTOR, r.height / SCREEN_FACTOR}
+}
+
+world_to_screen_rect :: proc(s: ^State, r: raylib.Rectangle) -> raylib.Rectangle {
+    pos := world_to_screen(s, raylib.Vector2{r.x, r.y})
+    return {pos.x, pos.y, r.width * SCREEN_FACTOR, r.height * SCREEN_FACTOR}
+}
+
+// Where the mouse is in world coordinates right now.
+mouse_world :: proc(s: ^State) -> raylib.Vector2 {
+    return screen_to_world(s, s.mpos)
+}
+
+point_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
+    return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
+}
+
 // Badge / label color for each kind of entity.
 role_color :: proc(r: game.EntityRole) -> raylib.Color {
     switch r {
@@ -197,8 +252,14 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
         fmt.println(e)
         panic("body is fucked")
     }
-    // raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.RED);
-    draw_rect(s, p, game.rect_size(e.body), raylib.RED)
+    // Hover test happens in world space (mouse converted through the zoom),
+    // so it matches the drawn body at any SCREEN_FACTOR.
+    if point_in_rect(e.body, mouse_world(s)) {
+        draw_rect(s, p, game.rect_size(e.body), raylib.YELLOW)
+    } else {
+        // raylib.DrawRectangleV(p, game.rect_size(e.body), raylib.RED);
+        draw_rect(s, p, game.rect_size(e.body), raylib.RED)
+    }
     width := f32(s.assets.assets[e.texture].texture.width)
     height := f32(s.assets.assets[e.texture].texture.height)
     src := raylib.Rectangle {
@@ -270,12 +331,12 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
         {
             if e.mb == .RIGHT {     // move
                 p := s.spref // player ref
-                sposx := (e.click.x - 0.5) * SCALED_SCREEN_WIDTH()
-                sposy := (e.click.y - 0.5) * SCALED_SCREEN_HEIGHT()
-                send_pos := raylib.Vector2{sposx, sposy} + game.rect_pos(p.body)
-                // init
-                // --- handle_input: MOVE case inside IE_MB_PRESSED / RIGHT ---
-                // replace the block that builds/sends the move message with:
+                // e.click is the mouse as 0..1 of the window; back to pixels,
+                // then through the zoom into world space. move_to is the
+                // body's top-left, so subtract half the body to put the
+                // body's center under the cursor.
+                click_screen := e.click * raylib.Vector2{SCREEN_WIDTH, SCREEN_HEIGHT}
+                send_pos := screen_to_world(s, click_screen) - game.rect_size(p.body) * 0.5
                 b := game.init_send_message()
                 game.pack_client_message(&b, game.Msg{
                     kind = .USER_MSG,
@@ -610,6 +671,7 @@ main :: proc() {
         t += dt;
         rl_to_game(&events) // events
         mp := raylib.GetMousePosition()
+        s.mpos = mp
         pdirection := mp - {SCREEN_WIDTH,SCREEN_HEIGHT}/2;
         if pdirection != prev_direction {
             s.pdirection = pdirection
