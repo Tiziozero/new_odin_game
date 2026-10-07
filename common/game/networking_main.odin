@@ -16,17 +16,66 @@ MsgKind :: enum u8 {
     GAME_DATA,
     GAME_MSG,
     USER_MSG,
+    STRING_MSG, // server -> client: human readable text (system, combat log, errors)
 }
 
 UserMsgKind :: enum u8 {
     MOVE,
     ABILITY,
     DIRECTION,
+    ENTER_SPACE, // ask the server to move me into another space
+    LEAVE_SPACE, // ask the server to move me back to where I came from
 }
 
 GameMsgKind :: enum u8 {
     SPAWN_PROJECTILE,
     REMOVE_PROJECTILE,
+    SPACE_CHANGED, // you were moved into a different space; a full sync follows
+}
+
+// Kinds of projectile things that can ride along in GameData. Separate from
+// GameMsgKind so GameData readers never have to handle unrelated kinds.
+ProjectileEventKind :: enum u8 {
+    SPAWN_PROJECTILE,
+    REMOVE_PROJECTILE,
+}
+
+EntityEventKind :: enum u8 {
+    DAMAGED,   // entity took damage. amount = damage dealt, health = health after
+    DIED,      // entity's health reached 0. source_id = killer (0 if unknown)
+    RESPAWNED, // a player died and came back. health = new health (position is in the delta)
+    REMOVED,   // entity left this space (NPC died, disconnect, moved space). Drop it client side.
+}
+
+StringMsgKind :: enum u8 {
+    INFO,
+    SYSTEM,
+    COMBAT,
+    CHAT,
+    ERROR,
+}
+
+// What an entity *is*, for display / client-side logic. Sent with every
+// EntityUpdate. Add new values at the END to keep the wire values stable.
+EntityRole :: enum u8 {
+    Unknown,
+    Player,
+    Idle,       // NPC that stands still
+    Wanderer,   // NPC that roams around its home
+    Shopkeeper, // NPC that stands still, can't be hit
+    Hostile,    // NPC that chases players
+}
+
+entity_role_name :: proc(r: EntityRole) -> string {
+    switch r {
+    case .Unknown:    return "???"
+    case .Player:     return "Player"
+    case .Idle:       return "Idle"
+    case .Wanderer:   return "Wanderer"
+    case .Shopkeeper: return "Shopkeeper"
+    case .Hostile:    return "Hostile"
+    }
+    return "???"
 }
 
 // ---------------------------------------------------------------------
@@ -67,6 +116,14 @@ DirectionMsg :: struct {
     direction: raylib.Vector2,
 }
 
+// Client asks to enter a space. The server decides whether that's allowed.
+EnterSpaceMsg :: struct {
+    space_id: u32,
+}
+
+// Client asks to go back to the space it entered the current one from.
+LeaveSpaceMsg :: struct {}
+
 UserMsg :: struct {
     user_id: u32,
     kind:    UserMsgKind,
@@ -74,6 +131,8 @@ UserMsg :: struct {
         MoveMsg,
         AbilityMsg,
         DirectionMsg,
+        EnterSpaceMsg,
+        LeaveSpaceMsg,
     },
 }
 
@@ -85,23 +144,50 @@ RemoveProjectileMsg :: struct {
     projectile_id: u32,
 }
 
+// Sent right before the full sync of the new space.
+SpaceChangedMsg :: struct {
+    space_id: u32,
+    pos:      raylib.Vector2,
+}
+
 GameMsg :: struct {
     kind: GameMsgKind,
     data: union {
         SpawnProjectileMsg,
         RemoveProjectileMsg,
+        SpaceChangedMsg,
     },
+}
+
+// Plain text for the player. sender == 0 means "the server".
+// NOTE: when unpacked, `text` lives in context.temp_allocator - clone it
+// if you keep it past the current frame.
+StringMsg :: struct {
+    kind:   StringMsgKind,
+    sender: u32,
+    text:   string,
 }
 
 // One projectile-related thing that happened since the previous tick.
 // GameData carries a list of these on every *normal* update instead of
 // re-sending every projectile every time.
 ProjectileEvent :: struct {
-    kind: GameMsgKind, // .SPAWN_PROJECTILE or .REMOVE_PROJECTILE
+    kind: ProjectileEventKind,
     data: union {
         SpawnProjectileMsg,
         RemoveProjectileMsg,
     },
+}
+
+// One entity-related thing that happened since the previous tick
+// (damage, death, respawn, removal). Fields not meaningful for a given
+// kind are zero.
+EntityEvent :: struct {
+    kind:      EntityEventKind,
+    entity_id: u32,
+    source_id: u32, // who caused it (attacker), 0 if none/unknown
+    amount:    f32,
+    health:    f32,
 }
 
 UserData :: struct {
@@ -117,29 +203,35 @@ UserData :: struct {
 
 EntityUpdate :: struct {
     id:    u32,
+    role:  EntityRole, // what the entity is; sent every update
     delta: EntityDelta,
 }
 
 // GameData is the ONLY payload ever sent for MsgKind.GAME_DATA, and it
-// always has the exact same shape on the wire - no more "sometimes the
-// projectile section is there, sometimes it isn't". The one thing that
-// varies is `full_sync`:
+// always has the exact same shape on the wire. `space_id` says which space
+// this data describes, so a client can ignore stale packets that were
+// still in flight when it changed space. The one thing that varies is
+// `full_sync`:
 //
-//   full_sync == false (the normal case, sent every tick):
-//     - entities          delta-encoded changes since last tick
-//     - projectile_events spawn/remove events since last tick
-//                         (can legitimately be empty - that's a quiet
-//                         tick, not a missing/corrupt field)
+//   full_sync == false (the normal case, sent every few ticks):
+//     - entities          delta-encoded changes since last send
+//     - entity_events     damage/death/respawn/removal since last send
+//     - projectile_events spawn/remove events since last send
+//                         (events can legitimately be empty - that's a
+//                         quiet tick, not a missing/corrupt field)
 //     - full_projectiles  always empty
 //
-//   full_sync == true (sent once, right after CONNECT):
+//   full_sync == true (sent after CONNECT and after a space change):
 //     - entities          full state for every entity
+//     - entity_events     always empty
 //     - projectile_events always empty
 //     - full_projectiles  every currently active projectile
 GameData :: struct {
     user_data:         UserData,
+    space_id:          u32,
     full_sync:         bool,
     entities:          []EntityUpdate,
+    entity_events:     []EntityEvent,
     projectile_events: []ProjectileEvent,
     full_projectiles:  []Projectile,
 }
@@ -155,6 +247,7 @@ Msg :: struct {
         GameData,
         GameMsg,
         UserMsg,
+        StringMsg,
     },
 }
 
@@ -198,6 +291,30 @@ send_message :: proc(
 }
 
 // ---------------------------------------------------------------------
+// Strings: u8 length prefix + raw bytes. Longer strings are truncated.
+// ---------------------------------------------------------------------
+
+MAX_STRING_LEN :: 255
+
+pack_string :: proc(buf: ^buffer_io.Buffer, str: string) {
+    n := min(len(str), MAX_STRING_LEN)
+    buffer_io.buffer_write_u8(buf, u8(n))
+    for i in 0 ..< n {
+        buffer_io.buffer_write_u8(buf, str[i])
+    }
+}
+
+// Result lives in context.temp_allocator.
+unpack_string :: proc(buf: ^buffer_io.Buffer) -> string {
+    n, ok := buffer_io.buffer_read_u8(buf); assert(ok)
+    bytes := make([]u8, int(n), context.temp_allocator)
+    for i in 0 ..< int(n) {
+        bytes[i], ok = buffer_io.buffer_read_u8(buf); assert(ok)
+    }
+    return string(bytes)
+}
+
+// ---------------------------------------------------------------------
 // Projectile "spawn data" - the fields needed to (re)create a projectile
 // on the receiving end. Used both for a SPAWN_PROJECTILE event and for
 // GameData.full_projectiles, so there's exactly one format for it.
@@ -233,10 +350,34 @@ unpack_projectile_spawn_data :: proc(buf: ^buffer_io.Buffer) -> Projectile {
 }
 
 // ---------------------------------------------------------------------
+// Entity events
+// ---------------------------------------------------------------------
+
+pack_entity_event :: proc(buf: ^buffer_io.Buffer, ev: EntityEvent) {
+    buffer_io.buffer_write_u8(buf, u8(ev.kind))
+    buffer_io.buffer_write_u32(buf, ev.entity_id)
+    buffer_io.buffer_write_u32(buf, ev.source_id)
+    buffer_io.buffer_write_f32(buf, ev.amount)
+    buffer_io.buffer_write_f32(buf, ev.health)
+}
+
+unpack_entity_event :: proc(buf: ^buffer_io.Buffer) -> EntityEvent {
+    ev := EntityEvent{}
+    ok := false
+    raw_kind: u8
+    raw_kind, ok = buffer_io.buffer_read_u8(buf);        assert(ok)
+    ev.kind = EntityEventKind(raw_kind)
+    ev.entity_id, ok = buffer_io.buffer_read_u32(buf);   assert(ok)
+    ev.source_id, ok = buffer_io.buffer_read_u32(buf);   assert(ok)
+    ev.amount, ok = buffer_io.buffer_read_f32(buf);      assert(ok)
+    ev.health, ok = buffer_io.buffer_read_f32(buf);      assert(ok)
+    return ev
+}
+
+// ---------------------------------------------------------------------
 // GameData pack/unpack - the single canonical path. The server's
-// per-tick send and its post-CONNECT full-sync send both go through
-// this, and so does the client's receive path. There is exactly one
-// wire format now, not two.
+// per-tick send and its full-sync sends both go through this, and so
+// does the client's receive path. There is exactly one wire format.
 // ---------------------------------------------------------------------
 
 pack_user_data :: proc(buf: ^buffer_io.Buffer, u: UserData) {
@@ -271,6 +412,8 @@ unpack_user_data :: proc(buf: ^buffer_io.Buffer) -> UserData {
 pack_game_data :: proc(buf: ^buffer_io.Buffer, data: GameData) {
     pack_user_data(buf, data.user_data)
 
+    buffer_io.buffer_write_u32(buf, data.space_id)
+
     full_sync_byte: u8 = 1 if data.full_sync else 0
     buffer_io.buffer_write_u8(buf, full_sync_byte)
 
@@ -278,8 +421,15 @@ pack_game_data :: proc(buf: ^buffer_io.Buffer, data: GameData) {
     buffer_io.buffer_write_u32(buf, u32(len(data.entities)))
     for e in data.entities {
         buffer_io.buffer_write_u32(buf, e.id)
+        buffer_io.buffer_write_u8(buf, u8(e.role))
         delta := e.delta
         pack_entity(buf, &delta)
+    }
+
+    // entity events - always present (possibly zero-length)
+    buffer_io.buffer_write_u32(buf, u32(len(data.entity_events)))
+    for ev in data.entity_events {
+        pack_entity_event(buf, ev)
     }
 
     // projectile events - always present (possibly zero-length), even
@@ -313,6 +463,8 @@ unpack_game_data :: proc(buf: ^buffer_io.Buffer) -> GameData {
 
     data.user_data = unpack_user_data(buf)
 
+    data.space_id, ok = buffer_io.buffer_read_u32(buf); assert(ok)
+
     full_sync_byte: u8
     full_sync_byte, ok = buffer_io.buffer_read_u8(buf); assert(ok)
     data.full_sync = full_sync_byte != 0
@@ -323,11 +475,21 @@ unpack_game_data :: proc(buf: ^buffer_io.Buffer) -> GameData {
     for i in 0 ..< entity_count {
         id: u32
         id, ok = buffer_io.buffer_read_u32(buf); assert(ok)
+        raw_role: u8
+        raw_role, ok = buffer_io.buffer_read_u8(buf); assert(ok)
         delta := EntityDelta{}
         unpack_entity(buf, &delta)
-        entities[i] = EntityUpdate{id = id, delta = delta}
+        entities[i] = EntityUpdate{id = id, role = EntityRole(raw_role), delta = delta}
     }
     data.entities = entities
+
+    entity_event_count: u32
+    entity_event_count, ok = buffer_io.buffer_read_u32(buf); assert(ok)
+    entity_events := make([]EntityEvent, entity_event_count, context.temp_allocator)
+    for i in 0 ..< entity_event_count {
+        entity_events[i] = unpack_entity_event(buf)
+    }
+    data.entity_events = entity_events
 
     event_count: u32
     event_count, ok = buffer_io.buffer_read_u32(buf); assert(ok)
@@ -335,7 +497,7 @@ unpack_game_data :: proc(buf: ^buffer_io.Buffer) -> GameData {
     for i in 0 ..< event_count {
         raw_kind: u8
         raw_kind, ok = buffer_io.buffer_read_u8(buf); assert(ok)
-        kind := GameMsgKind(raw_kind)
+        kind := ProjectileEventKind(raw_kind)
         ev := ProjectileEvent{kind = kind}
         switch kind {
         case .SPAWN_PROJECTILE:
@@ -344,6 +506,8 @@ unpack_game_data :: proc(buf: ^buffer_io.Buffer) -> GameData {
             id: u32
             id, ok = buffer_io.buffer_read_u32(buf); assert(ok)
             ev.data = RemoveProjectileMsg{projectile_id = id}
+        case:
+            panic("Invalid ProjectileEventKind")
         }
         events[i] = ev
     }
@@ -388,7 +552,17 @@ pack_server_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
             pack_projectile_spawn_data(buf, v.projectile)
         case RemoveProjectileMsg:
             buffer_io.buffer_write_u32(buf, v.projectile_id)
+        case SpaceChangedMsg:
+            buffer_io.buffer_write_u32(buf, v.space_id)
+            buffer_io.buffer_write_f32(buf, v.pos.x)
+            buffer_io.buffer_write_f32(buf, v.pos.y)
         }
+
+    case .STRING_MSG:
+        d := msg.data.(StringMsg)
+        buffer_io.buffer_write_u8(buf, u8(d.kind))
+        buffer_io.buffer_write_u32(buf, d.sender)
+        pack_string(buf, d.text)
 
     case .PING_RESPOND:
         d := msg.data.(PingRespondMsg)
@@ -435,8 +609,23 @@ unpack_client_message :: proc(buf: ^buffer_io.Buffer) -> Msg {
             id: u32
             id, ok = buffer_io.buffer_read_u32(buf); assert(ok)
             gm.data = RemoveProjectileMsg{projectile_id = id}
+        case .SPACE_CHANGED:
+            sc := SpaceChangedMsg{}
+            sc.space_id, ok = buffer_io.buffer_read_u32(buf); assert(ok)
+            sc.pos.x, ok = buffer_io.buffer_read_f32(buf);    assert(ok)
+            sc.pos.y, ok = buffer_io.buffer_read_f32(buf);    assert(ok)
+            gm.data = sc
         }
         msg.data = gm
+
+    case .STRING_MSG:
+        d := StringMsg{}
+        raw: u8
+        raw, ok = buffer_io.buffer_read_u8(buf);        assert(ok)
+        d.kind = StringMsgKind(raw)
+        d.sender, ok = buffer_io.buffer_read_u32(buf);  assert(ok)
+        d.text = unpack_string(buf)
+        msg.data = d
 
     case .PING_RESPOND:
         d := PingRespondMsg{}
@@ -493,9 +682,13 @@ pack_client_message :: proc(buf: ^buffer_io.Buffer, msg: Msg) {
         case DirectionMsg:
             buffer_io.buffer_write_f32(buf, v.direction.x)
             buffer_io.buffer_write_f32(buf, v.direction.y)
+        case EnterSpaceMsg:
+            buffer_io.buffer_write_u32(buf, v.space_id)
+        case LeaveSpaceMsg:
+            // no payload
         }
 
-    case .GAME_DATA, .GAME_MSG, .PING_RESPOND:
+    case .GAME_DATA, .GAME_MSG, .PING_RESPOND, .STRING_MSG:
         panic("Client attempted to send a server message")
 
     case:
@@ -559,12 +752,18 @@ unpack_server_message :: proc(buf: ^buffer_io.Buffer) -> Msg {
             dir.direction.x, ok = buffer_io.buffer_read_f32(buf); assert(ok)
             dir.direction.y, ok = buffer_io.buffer_read_f32(buf); assert(ok)
             d.data = dir
+        case .ENTER_SPACE:
+            m := EnterSpaceMsg{}
+            m.space_id, ok = buffer_io.buffer_read_u32(buf); assert(ok)
+            d.data = m
+        case .LEAVE_SPACE:
+            d.data = LeaveSpaceMsg{}
         case:
             panic("Invalid UserMsgKind")
         }
         msg.data = d
 
-    case .GAME_DATA, .GAME_MSG, .PING_RESPOND:
+    case .GAME_DATA, .GAME_MSG, .PING_RESPOND, .STRING_MSG:
         panic("Server received a server message")
 
     case:

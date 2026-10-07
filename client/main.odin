@@ -66,8 +66,14 @@ State :: struct {
     state_lock:         sync.Mutex,
     // server entities
     state_entities:     map[game.EntityHandle]game.Entity,
+    // what each server entity is (player, shopkeeper, ...). Written by the
+    // receiver thread under state_lock, alongside state_entities.
+    entity_roles:       map[game.EntityHandle]game.EntityRole,
     // interpolates from server entities
     current_entities:   map[game.EntityHandle]game.Entity,
+    // main-thread copy of entity_roles, matching current_entities. Draw code
+    // reads this one so it never touches the receiver thread's map.
+    current_roles:      map[game.EntityHandle]game.EntityRole,
 
     projectiles:        [dynamic]game.Projectile,
     projectiles_count:  u32,
@@ -171,6 +177,20 @@ SCALED_SCREEN_WIDTH :: proc() -> f32 {
 SCALED_SCREEN_HEIGHT :: proc() -> f32 {
     return f32(SCREEN_HEIGHT) / f32(SCREEN_FACTOR)
 }
+
+// Badge / label color for each kind of entity.
+role_color :: proc(r: game.EntityRole) -> raylib.Color {
+    switch r {
+    case .Unknown:    return raylib.GRAY
+    case .Player:     return raylib.SKYBLUE
+    case .Idle:       return raylib.LIGHTGRAY
+    case .Wanderer:   return raylib.GREEN
+    case .Shopkeeper: return raylib.GOLD
+    case .Hostile:    return raylib.RED
+    }
+    return raylib.GRAY
+}
+
 draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     p := apply_camera(camera, game.rect_pos(e.body))
     if e.body.width == 0 || e.body.height == 0 {
@@ -190,6 +210,14 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     src=raylib.Rectangle{ x=0,y=0, width=width, height=height }
     dest := raylib.Rectangle{p.x, p.y, e.body.width, e.body.height}
     draw_sprite_rect(s, texture = s.assets.assets[e.texture].texture, body = dest)
+
+    // what is this entity? (main thread only map, see State.current_roles)
+    role := s.current_roles[e.id] or_else game.EntityRole.Unknown
+    color := role_color(role)
+
+    // colored badge in the top-left corner of the body
+    draw_rect(s, p + raylib.Vector2{0, -10}, raylib.Vector2{8, 8}, color)
+
     // draw id
     str := fmt.aprintf("%d:%.1f", e.id, e.health, allocator = s.frame_arena.block_allocator)
 
@@ -202,6 +230,8 @@ draw_entity :: proc(s: ^State, camera: raylib.Rectangle, e: ^game.Entity) {
     // raylib.DrawRectangle(i32(tpos.x)-2, i32(tpos.y), w + 4, 20, raylib.BLACK);
     // raylib.DrawText(cstr, i32(tpos.x), i32(tpos.y), 20, raylib.WHITE);
     draw_text_center(s, text = str, pos = tpos, size = 20, spacing = 5)
+    // role name one line above the id/health line
+    draw_text_center(s, text = game.entity_role_name(role), pos = tpos - raylib.Vector2{0, 22}, size = 20, spacing = 5)
     // delete(cstr);
 }
 draw_projectile :: proc(s: ^State, p: ^game.Projectile) {
@@ -283,14 +313,18 @@ handle_server_msg :: proc(s: ^State, buf: ^buffer_io.Buffer) {
     msg := game.unpack_client_message(buf)
 
     switch msg.kind {
+    case .STRING_MSG: {
+        fmt.println(msg.data.(game.StringMsg))
+    }
     case .GAME_DATA:
         data := msg.data.(game.GameData)
         apply_game_data(s, data)
 
     case .GAME_MSG:
-        // Not currently sent by the server (projectile changes travel
-        // inside GameData.projectile_events instead) - reserved for
-        // future out-of-band events.
+        // Projectile changes travel inside GameData.projectile_events.
+        // The only thing sent out-of-band right now is SPACE_CHANGED, which
+        // is just logged: the full sync that follows it replaces the world.
+        fmt.println(msg.data.(game.GameMsg))
 
     case .PING_RESPOND:
         d := msg.data.(game.PingRespondMsg)
@@ -313,8 +347,9 @@ handle_server_msg :: proc(s: ^State, buf: ^buffer_io.Buffer) {
 }
 
 // Applies one GameData snapshot to client state. Same function handles
-// both a normal delta tick and the post-CONNECT full sync - the only
-// difference is which branch of the projectile logic runs.
+// both a normal delta tick and a full sync - the only difference is which
+// branch of the projectile logic runs, and that a full sync also drops any
+// entity it doesn't list.
 apply_game_data :: proc(s: ^State, data: game.GameData) {
     sync.lock(&s.state_lock)
 
@@ -328,18 +363,47 @@ apply_game_data :: proc(s: ^State, data: game.GameData) {
     }
     s.move_to = data.user_data.move_to
 
+    // Removals first: if an id is removed and re-added in the same packet
+    // (reconnect), the delta below must win. Prunes for current_entities /
+    // current_roles happen on the main thread, in the frame copy loop.
+    for ev in data.entity_events {
+        if ev.kind == .REMOVED {
+            h := game.EntityHandle(ev.entity_id)
+            delete_key(&s.state_entities, h)
+            delete_key(&s.entity_roles, h)
+        }
+    }
+
     for e in data.entities {
-        last, last_ok := s.state_entities[e.id]
+        h := game.EntityHandle(e.id)
+        last, last_ok := s.state_entities[h]
         if !last_ok {
             last = game.Entity{}
         }
         last.id = e.id
         delta := e.delta
         game.implement_entity_delta(&last, &delta)
-        s.state_entities[e.id] = last
+        s.state_entities[h] = last
+        s.entity_roles[h] = e.role
     }
 
     if data.full_sync {
+        // A full sync is the complete truth: forget everything it doesn't list.
+        present := make(map[game.EntityHandle]struct{}, context.temp_allocator)
+        for e in data.entities {
+            present[game.EntityHandle(e.id)] = {}
+        }
+        stale := make([dynamic]game.EntityHandle, context.temp_allocator)
+        for k in s.state_entities {
+            if k not_in present {
+                append(&stale, k)
+            }
+        }
+        for k in stale {
+            delete_key(&s.state_entities, k)
+            delete_key(&s.entity_roles, k)
+        }
+
         for u32(len(s.projectiles)) < u32(len(data.full_projectiles)) {
             append(&s.projectiles, game.Projectile{})
         }
@@ -582,7 +646,25 @@ main :: proc() {
                 copy.body.y = new_pos.y
             }
             s.current_entities[k] = copy
+            s.current_roles[k] = s.entity_roles[k] or_else game.EntityRole.Unknown
         }
+
+        // Drop entities the server no longer has (died, disconnected, left the
+        // space). Without this they stay in current_entities and get drawn
+        // forever as ghosts nobody can hit.
+        stale: [1024]game.EntityHandle
+        stale_n := 0
+        for k in s.current_entities {
+            if k not_in s.state_entities && stale_n < len(stale) {
+                stale[stale_n] = k
+                stale_n += 1
+            }
+        }
+        for k in stale[:stale_n] {
+            delete_key(&s.current_entities, k)
+            delete_key(&s.current_roles, k)
+        }
+
         pref, pok := s.state_entities[ID] // set to server entity
         assert(pok)
         s.spref = s.current_entities[ID] // set spref to what player sees

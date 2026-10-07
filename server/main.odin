@@ -24,6 +24,16 @@ ABILITIES_COUNT   :: game.ABILITIES_COUNT
 MAX_TIMEOUT       :: 10 * time.Second
 NPC_AGGRO_RADIUS  :: 300
 
+// Damage a projectile does when its owner is gone or has no attack stat.
+PROJECTILE_DAMAGE :: 10
+
+// Max distance between wall samples along a projectile's path in one tick.
+// Keep this at or below your thinnest wall.
+PROJECTILE_WALL_STEP :: 8
+
+// Where players spawn / respawn / arrive when entering a space.
+SPAWN_POS :: raylib.Vector2{0, 0}
+
 // Player entity handles == the client's user_id (the wire format identifies
 // the player's own entity by it). NPC handles are allocated by the server
 // starting here; server_alloc_handle skips anything already in use.
@@ -113,8 +123,10 @@ Space :: struct {
     projectiles:       [PROJECTILES_COUNT]game.Projectile,
     projectiles_count: u32,
 
-    // projectile spawn/remove events since the last per-tick GameData
-    events: [dynamic]game.ProjectileEvent,
+    // things that happened since the last per-tick GameData; drained by
+    // build_game_data (or cleared when nobody is in the space)
+    events:        [dynamic]game.ProjectileEvent,
+    entity_events: [dynamic]game.EntityEvent,
 }
 
 space_make :: proc(id: SpaceId, persistent: bool, variant: SpaceVariant) -> ^Space {
@@ -125,6 +137,7 @@ space_make :: proc(id: SpaceId, persistent: bool, variant: SpaceVariant) -> ^Spa
     sp.gmap = game.new_map()
     sp.entities = make(map[game.EntityHandle]ServerEntity)
     sp.events = make([dynamic]game.ProjectileEvent)
+    sp.entity_events = make([dynamic]game.EntityEvent)
     game.generate_chunck(&sp.gmap, 0, 0) // TODO: per-variant generation (seed, purpose)
     return sp
 }
@@ -132,6 +145,7 @@ space_make :: proc(id: SpaceId, persistent: bool, variant: SpaceVariant) -> ^Spa
 space_destroy :: proc(sp: ^Space) {
     delete(sp.entities)
     delete(sp.events)
+    delete(sp.entity_events)
     // TODO: free sp.gmap once game.Map has a destroy proc
     free(sp)
 }
@@ -140,6 +154,10 @@ space_get_entity :: proc(sp: ^Space, h: game.EntityHandle) -> ^ServerEntity {
     if sp == nil { return nil }
     if h in sp.entities { return &sp.entities[h] }
     return nil
+}
+
+space_emit_entity_event :: proc(sp: ^Space, ev: game.EntityEvent) {
+    append(&sp.entity_events, ev)
 }
 
 // ---------------------------------------------------------------------
@@ -154,8 +172,13 @@ Client :: struct {
     last_ping: time.Time,
     no_send:   bool, // connected but hasn't sent START_GAME yet
     space:     SpaceId,
+
+    // where "leave space" brings the player back to
+    return_space: SpaceId,
+    return_pos:   raylib.Vector2,
 }
 
+// ok == true means success; otherwise `error` says why.
 error :: distinct struct { error: string, ok: bool }
 AbilityProc :: distinct proc(s: ^Server, sp: ^Space, caster: ^ServerEntity, id, level: u32, target: raylib.Vector2) -> error
 Ability :: struct {
@@ -200,8 +223,8 @@ server_init :: proc(s: ^Server) {
                 owner     = caster.id,
                 origin    = origin,
                 position  = origin,
-                speed     = 100,
-                range     = 200,
+                speed     = 750,
+                range     = 300,
                 direction = target,
             }
             if !space_spawn_projectile(s, sp, p) {
@@ -242,6 +265,54 @@ random_texture :: proc(s: ^Server) -> u32 {
 }
 
 // ---------------------------------------------------------------------
+// Messaging: plain text to clients
+// ---------------------------------------------------------------------
+
+// Sends one text message to one client. sender == 0 means "the server".
+send_string_msg :: proc(
+    s: ^Server, c: ^Client, text: string,
+    kind := game.StringMsgKind.INFO, sender: u32 = 0,
+) {
+    if c == nil { return }
+    b := game.init_send_message()
+    game.pack_server_message(&b, game.Msg{
+        kind = .STRING_MSG,
+        data = game.StringMsg{kind = kind, sender = sender, text = text},
+    })
+    if err := game.send_message(s.socket, c.endpoint, &b); err != .None {
+        fmt.println("error sending string msg to client", c.user_id, err)
+    }
+}
+
+// Sends a text message to every started client in `sp`, or to every started
+// client on the server when sp == nil.
+broadcast_string_msg :: proc(
+    s: ^Server, sp: ^Space, text: string,
+    kind := game.StringMsgKind.INFO, sender: u32 = 0,
+) {
+    for _, &c in s.clients {
+        if c.no_send { continue }
+        if sp != nil && c.space != sp.id { continue }
+        send_string_msg(s, &c, text, kind, sender)
+    }
+}
+
+// Tells a client it now lives in another space. A full sync should follow.
+send_space_changed :: proc(s: ^Server, c: ^Client, space_id: SpaceId, pos: raylib.Vector2) {
+    b := game.init_send_message()
+    game.pack_server_message(&b, game.Msg{
+        kind = .GAME_MSG,
+        data = game.GameMsg{
+            kind = .SPACE_CHANGED,
+            data = game.SpaceChangedMsg{space_id = u32(space_id), pos = pos},
+        },
+    })
+    if err := game.send_message(s.socket, c.endpoint, &b); err != .None {
+        fmt.println("error sending space change to client", c.user_id, err)
+    }
+}
+
+// ---------------------------------------------------------------------
 // Entity management
 // ---------------------------------------------------------------------
 
@@ -263,12 +334,18 @@ server_add_entity :: proc(s: ^Server, sp: ^Space, e: ServerEntity) {
     if ent.kind == .Player { sp.player_count += 1 }
 }
 
+// Removes the entity from the space and tells the space's clients to drop it.
 server_remove_entity :: proc(s: ^Server, sp: ^Space, h: game.EntityHandle) -> (ServerEntity, bool) {
     e, ok := sp.entities[h]
     if !ok { return {}, false }
     delete_key(&sp.entities, h)
     delete_key(&s.entity_index, h)
     if e.kind == .Player { sp.player_count -= 1 }
+    space_emit_entity_event(sp, game.EntityEvent{
+        kind      = .REMOVED,
+        entity_id = u32(h),
+        health    = f32(e.health),
+    })
     return e, true
 }
 
@@ -283,7 +360,7 @@ make_player :: proc(s: ^Server, handle: game.EntityHandle) -> ServerEntity {
             texture = random_texture(s),
             health  = 100,
             status  = .ESALIVE,
-            body    = raylib.Rectangle{0, 0, 32, 32},
+            body    = raylib.Rectangle{SPAWN_POS.x, SPAWN_POS.y, 32, 32},
         },
     }
     e.last_sent = e.entity
@@ -315,6 +392,122 @@ server_spawn_npc :: proc(
     e.last_sent = e.entity
     server_add_entity(s, sp, e)
     return h
+}
+
+entity_label :: proc(e: ^ServerEntity) -> string {
+    if e.kind == .Player {
+        return fmt.tprintf("Player %d", u32(e.id))
+    }
+    return fmt.tprintf("NPC %d", u32(e.id))
+}
+
+// What clients should show this entity as. Sent with every EntityUpdate.
+entity_role :: proc(e: ^ServerEntity) -> game.EntityRole {
+    switch e.kind {
+    case .Player:
+        return .Player
+    case .Npc:
+        switch e.npc.behavior {
+        case .Idle:       return .Idle
+        case .Wander:     return .Wanderer
+        case .Shopkeeper: return .Shopkeeper
+        case .Hostile:    return .Hostile
+        }
+    }
+    return .Unknown
+}
+
+// ---------------------------------------------------------------------
+// Damage & death
+// ---------------------------------------------------------------------
+
+// Applies damage and emits a DAMAGED event. Returns true if this hit took
+// the entity to 0 health. It does NOT handle the death itself - the caller
+// follows up with server_kill_entity (which may remove the entity, so
+// don't use `target` afterwards).
+entity_apply_damage :: proc(sp: ^Space, target: ^ServerEntity, amount: f32, source: game.EntityHandle) -> bool {
+    if amount <= 0 || !target.targetable { return false }
+
+    hp := f32(target.health)
+    if hp <= 0 { return false } // already dead
+
+    hp = max(hp - amount, 0)
+    target.health = type_of(target.health)(hp)
+
+    space_emit_entity_event(sp, game.EntityEvent{
+        kind      = .DAMAGED,
+        entity_id = u32(target.id),
+        source_id = u32(source),
+        amount    = amount,
+        health    = hp,
+    })
+    return hp <= 0
+}
+
+// Players respawn immediately at SPAWN_POS with full health. (If you want a
+// respawn timer later, this is the place.)
+server_respawn_player :: proc(s: ^Server, sp: ^Space, e: ^ServerEntity) {
+    e.health = type_of(e.health)(e.max_health)
+    e.energy = e.max_energy
+    e.body.x = SPAWN_POS.x
+    e.body.y = SPAWN_POS.y
+    e.move_to = SPAWN_POS
+    e.move_origin = SPAWN_POS
+
+    space_emit_entity_event(sp, game.EntityEvent{
+        kind      = .RESPAWNED,
+        entity_id = u32(e.id),
+        health    = f32(e.health),
+    })
+
+    if c := server_client(s, u32(e.id)); c != nil {
+        send_string_msg(s, c, "You died. Respawning...", .SYSTEM)
+    }
+}
+
+// Handles an entity's death: emits DIED, broadcasts a message to the space,
+// then respawns it (players) or removes it (NPCs).
+// After this returns the victim pointer may be invalid.
+server_kill_entity :: proc(s: ^Server, sp: ^Space, victim_h, killer_h: game.EntityHandle) {
+    victim := space_get_entity(sp, victim_h)
+    if victim == nil { return }
+    killer := space_get_entity(sp, killer_h) // nil if the killer left / is gone
+
+    space_emit_entity_event(sp, game.EntityEvent{
+        kind      = .DIED,
+        entity_id = u32(victim_h),
+        source_id = u32(killer_h),
+    })
+
+    killer_name := "something" if killer == nil else entity_label(killer)
+    broadcast_string_msg(
+        s, sp,
+        fmt.tprintf("%s was slain by %s", entity_label(victim), killer_name),
+        .COMBAT,
+    )
+
+    switch victim.kind {
+    case .Player:
+        server_respawn_player(s, sp, victim)
+    case .Npc:
+        server_remove_entity(s, sp, victim_h)
+    }
+}
+
+// Hook for on-hit effects. Projectiles live in the same space as the
+// entities they hit, so `sp` is the only space we need to look at.
+space_on_projectile_hit :: proc(s: ^Server, sp: ^Space, p: game.Projectile, target_h: game.EntityHandle) {
+    target := space_get_entity(sp, target_h)
+    if target == nil { return }
+
+    damage := f32(PROJECTILE_DAMAGE)
+    if owner := space_get_entity(sp, p.owner); owner != nil && owner.attack > 0 {
+        damage = owner.attack
+    }
+
+    if entity_apply_damage(sp, target, damage, p.owner) {
+        server_kill_entity(s, sp, target_h, p.owner)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -370,11 +563,13 @@ server_connect_client :: proc(s: ^Server, user_id: u32, endpoint: net.Endpoint) 
     }
 
     s.clients[user_id] = Client{
-        user_id   = user_id,
-        endpoint  = endpoint,
-        last_ping = time.now(),
-        no_send   = true,
-        space     = OPEN_WORLD_ID,
+        user_id      = user_id,
+        endpoint     = endpoint,
+        last_ping    = time.now(),
+        no_send      = true,
+        space        = OPEN_WORLD_ID,
+        return_space = OPEN_WORLD_ID,
+        return_pos   = SPAWN_POS,
     }
     server_add_entity(s, s.open_world, make_player(s, handle))
     send_full_sync(s, s.open_world, server_client(s, user_id))
@@ -391,9 +586,10 @@ server_remove_client :: proc(s: ^Server, user_id: u32) {
     delete_key(&s.clients, user_id)
 }
 
-// Moves a player into another space (portal, dungeon entrance, town...) and
-// sends them a full sync of it. Nothing triggers this yet - it needs a
-// message (or server-side portal logic) calling it.
+// Moves a player into another space (portal, dungeon entrance, town...).
+// Tells the client its space changed, then sends it a full sync of the new
+// one. Low-level: no permission checks - use server_enter_space /
+// server_leave_space for anything driven by a client request.
 server_transfer_client :: proc(s: ^Server, user_id: u32, dest_id: SpaceId, pos: raylib.Vector2) -> bool {
     c := server_client(s, user_id)
     if c == nil { return false }
@@ -415,8 +611,60 @@ server_transfer_client :: proc(s: ^Server, user_id: u32, dest_id: SpaceId, pos: 
 
     server_maybe_free_room(s, src) // src may be gone after this line
 
+    send_space_changed(s, c, dest_id, pos)
     send_full_sync(s, dest, c)
     return true
+}
+
+// Client-requested: enter `dest_id`. Remembers where the player came from so
+// server_leave_space can bring them back.
+server_enter_space :: proc(s: ^Server, user_id: u32, dest_id: SpaceId, pos := SPAWN_POS) -> error {
+    c, _, e := server_player(s, user_id)
+    if c == nil { return {"unknown player", false} }
+    if e == nil { return {"player has no entity", false} }
+    if c.no_send { return {"game has not started", false} }
+    if c.space == dest_id { return {"you are already in that space", false} }
+    if server_get_space(s, dest_id) == nil { return {"that space does not exist", false} }
+    if f32(e.health) <= 0 { return {"you are dead", false} }
+
+    // TODO: real entry validation - is the player standing at a portal /
+    // dungeon entrance, is the room full or locked, party/level checks...
+    // Right now any client can enter any existing space.
+
+    from_space := c.space
+    from_pos   := game.rect_pos(e.body)
+
+    // `e` is invalid after the transfer, so don't touch it below.
+    if !server_transfer_client(s, user_id, dest_id, pos) {
+        return {"could not enter that space", false}
+    }
+    c.return_space = from_space
+    c.return_pos   = from_pos
+    return {"", true}
+}
+
+// Client-requested: leave the current space and go back to where the player
+// entered it from (or the open world spawn if that no longer exists).
+server_leave_space :: proc(s: ^Server, user_id: u32) -> error {
+    c, _, e := server_player(s, user_id)
+    if c == nil { return {"unknown player", false} }
+    if e == nil { return {"player has no entity", false} }
+    if c.no_send { return {"game has not started", false} }
+    if c.space == OPEN_WORLD_ID { return {"you are already in the open world", false} }
+
+    dest := c.return_space
+    pos  := c.return_pos
+    if dest == c.space || server_get_space(s, dest) == nil {
+        dest = OPEN_WORLD_ID
+        pos  = SPAWN_POS
+    }
+
+    if !server_transfer_client(s, user_id, dest, pos) {
+        return {"could not leave this space", false}
+    }
+    c.return_space = OPEN_WORLD_ID
+    c.return_pos   = SPAWN_POS
+    return {"", true}
 }
 
 // ---------------------------------------------------------------------
@@ -441,11 +689,6 @@ space_spawn_projectile :: proc(s: ^Server, sp: ^Space, proj: game.Projectile) ->
         data = game.SpawnProjectileMsg{projectile = p},
     })
     return true
-}
-
-// Hook for damage / knockback / on-hit effects.
-space_on_projectile_hit :: proc(sp: ^Space, p: game.Projectile, target: ^ServerEntity) {
-    // TODO: look up the owner in sp.entities, apply damage to target.health, handle death.
 }
 
 cast_ability :: proc(s: ^Server, sp: ^Space, caster: ^ServerEntity, index: u8, target: raylib.Vector2) {
@@ -512,12 +755,14 @@ handle_user_msg :: proc(s: ^Server, buf: ^buffer_io.Buffer, endpoint: net.Endpoi
 
     case .USER_MSG:
         d := msg.data.(game.UserMsg)
-        _, sp, e := server_player(s, d.user_id)
+        c, sp, e := server_player(s, d.user_id)
         if e == nil {
             fmt.println("USER_MSG from unknown user:", d.user_id)
             return
         }
 
+        // NOTE: after enter/leave space, sp and e are invalid - don't use them
+        // past those cases.
         switch v in d.data {
         case game.MoveMsg:
             e.move_to.x = v.pos.x
@@ -530,12 +775,22 @@ handle_user_msg :: proc(s: ^Server, buf: ^buffer_io.Buffer, endpoint: net.Endpoi
 
         case game.DirectionMsg:
             e.facing = v.direction
+
+        case game.EnterSpaceMsg:
+            if res := server_enter_space(s, d.user_id, SpaceId(v.space_id)); !res.ok {
+                send_string_msg(s, c, res.error, .ERROR)
+            }
+
+        case game.LeaveSpaceMsg:
+            if res := server_leave_space(s, d.user_id); !res.ok {
+                send_string_msg(s, c, res.error, .ERROR)
+            }
         }
 
     case .GET_STATE:
         // no payload / not currently used
 
-    case .Invalid, .GAME_DATA, .GAME_MSG, .PING_RESPOND:
+    case .Invalid, .GAME_DATA, .GAME_MSG, .PING_RESPOND, .STRING_MSG:
         fmt.println("Server received an invalid or server-only message")
     }
 }
@@ -580,9 +835,10 @@ build_user_data :: proc(e: ^ServerEntity) -> game.UserData {
 // free_all(context.temp_allocator) once they're done sending it.
 //
 // Per-tick (non-full) builds advance each entity's `last_sent` and drain the
-// space's projectile events, so call it exactly once per space per send.
+// space's projectile and entity events, so call it exactly once per space
+// per send.
 build_game_data :: proc(sp: ^Space, full_sync: bool) -> game.GameData {
-    data := game.GameData{full_sync = full_sync}
+    data := game.GameData{full_sync = full_sync, space_id = u32(sp.id)}
 
     entities := make([dynamic]game.EntityUpdate, 0, len(sp.entities), context.temp_allocator)
     for h, &e in sp.entities {
@@ -592,11 +848,13 @@ build_game_data :: proc(sp: ^Space, full_sync: bool) -> game.GameData {
             e.last_sent = e.entity
             e.needs_full_delta = false
         }
-        append(&entities, game.EntityUpdate{id = u32(h), delta = delta})
+        append(&entities, game.EntityUpdate{id = u32(h), role = entity_role(&e), delta = delta})
     }
     data.entities = entities[:]
 
     if full_sync {
+        // a snapshot already reflects every past event, and the queued
+        // events still belong to the next per-tick send for everyone else
         full := make([]game.Projectile, sp.projectiles_count, context.temp_allocator)
         copy(full, sp.projectiles[:sp.projectiles_count])
         data.full_projectiles = full
@@ -605,6 +863,11 @@ build_game_data :: proc(sp: ^Space, full_sync: bool) -> game.GameData {
         copy(events, sp.events[:])
         clear(&sp.events)
         data.projectile_events = events
+
+        entity_events := make([]game.EntityEvent, len(sp.entity_events), context.temp_allocator)
+        copy(entity_events, sp.entity_events[:])
+        clear(&sp.entity_events)
+        data.entity_events = entity_events
     }
     return data
 }
@@ -624,8 +887,58 @@ send_full_sync :: proc(s: ^Server, sp: ^Space, c: ^Client) {
 // Simulation
 // ---------------------------------------------------------------------
 
-p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
-    return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
+// Segment a->b vs rectangle r (slab method). On a hit, `t` is how far along
+// the segment the first contact is, 0 = at `a`, 1 = at `b`. A segment that
+// starts inside the rect hits at t = 0.
+segment_rect_hit :: proc(a, b: raylib.Vector2, r: raylib.Rectangle) -> (t: f32, hit: bool) {
+    d := b - a
+    t_min := f32(0)
+    t_max := f32(1)
+
+    // x slab
+    if abs(d.x) < 1e-6 {
+        if a.x < r.x || a.x > r.x + r.width { return 0, false }
+    } else {
+        inv := 1 / d.x
+        t1 := (r.x - a.x) * inv
+        t2 := (r.x + r.width - a.x) * inv
+        if t1 > t2 { t1, t2 = t2, t1 }
+        t_min = max(t_min, t1)
+        t_max = min(t_max, t2)
+        if t_min > t_max { return 0, false }
+    }
+
+    // y slab
+    if abs(d.y) < 1e-6 {
+        if a.y < r.y || a.y > r.y + r.height { return 0, false }
+    } else {
+        inv := 1 / d.y
+        t1 := (r.y - a.y) * inv
+        t2 := (r.y + r.height - a.y) * inv
+        if t1 > t2 { t1, t2 = t2, t1 }
+        t_min = max(t_min, t1)
+        t_max = min(t_max, t2)
+        if t_min > t_max { return 0, false }
+    }
+
+    return t_min, true
+}
+
+// Segment a->b vs the map's walls. check_point_map_collisions only tests a
+// single point, so sample the segment every PROJECTILE_WALL_STEP pixels or
+// less. Returns the t (0..1) of the first sample inside a wall. Resolution
+// is limited by the step size: walls thinner than it can still be skipped.
+segment_wall_hit :: proc(sp: ^Space, a, b: raylib.Vector2) -> (t: f32, hit: bool) {
+    d := b - a
+    length := raylib.Vector2Length(d)
+    steps := max(int(math.ceil(length / PROJECTILE_WALL_STEP)), 1)
+    for i in 1 ..= steps {
+        ti := f32(i) / f32(steps)
+        if game.check_point_map_collisions(&sp.gmap, a + d * ti) {
+            return ti, true
+        }
+    }
+    return 0, false
 }
 
 // Shared by players and NPCs: walk towards move_to, then resolve wall collisions.
@@ -690,32 +1003,60 @@ npc_update :: proc(sp: ^Space, e: ^ServerEntity, dt: f32) {
             }
         }
         if !found { e.move_to = pos } // lost target: stop
-        // TODO: attack when in range
+        // TODO: attack when in range (use entity_apply_damage + server_kill_entity)
     }
 }
 
-// Returns the projectile's (possibly updated) state and whether it should be
-// removed. When remove is true the returned projectile's `id` is still valid -
-// the caller needs it to emit a REMOVE_PROJECTILE event.
-update_projectile :: proc(sp: ^Space, last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
-    p := last_p
-    p.position = last_p.position + raylib.Vector2Normalize(last_p.direction) * last_p.speed * dt
+ProjectileOutcome :: enum {
+    Flying,     // still in the air, keep it
+    HitEntity,  // hit a targetable entity (handle returned alongside)
+    HitWall,
+    OutOfRange,
+}
+
+// Advances a projectile and reports what happened to it. The whole path from
+// the old position to the new one is tested (not just the end point), so a
+// fast projectile can't skip over an entity's corner or a thin wall. If
+// several things lie on the path, the closest one to the start wins.
+//
+// Pure with respect to entities: it never mutates them, the caller applies
+// any hit. For every outcome other than .Flying the projectile should be
+// removed; on a hit its position is the impact point, and its `id` is still
+// valid for the REMOVE_PROJECTILE event.
+update_projectile :: proc(
+    sp: ^Space, last_p: game.Projectile, dt: f32,
+) -> (p: game.Projectile, outcome: ProjectileOutcome, hit: game.EntityHandle) {
+    p = last_p
+    from := last_p.position
+    to   := from + raylib.Vector2Normalize(last_p.direction) * last_p.speed * dt
+    p.position = to
+
+    best_t := f32(2) // anything real is <= 1
 
     for h, &e in sp.entities {
         if h == last_p.owner || !e.targetable { continue }
-        if p_in_rect(e.body, p.position) {
-            space_on_projectile_hit(sp, p, &e)
-            return p, true // hit entity
+        if t, ok := segment_rect_hit(from, to, e.body); ok && t < best_t {
+            best_t  = t
+            hit     = h
+            outcome = .HitEntity
         }
     }
 
-    if game.check_point_map_collisions(&sp.gmap, p.position) {
-        return p, true // hit wall
+    if t, ok := segment_wall_hit(sp, from, to); ok && t < best_t {
+        best_t  = t
+        hit     = 0
+        outcome = .HitWall
     }
+
+    if outcome != .Flying {
+        p.position = from + (to - from) * best_t
+        return
+    }
+
     if raylib.Vector2Distance(p.position, last_p.origin) > p.range {
-        return p, true // out of range
+        outcome = .OutOfRange
     }
-    return p, false
+    return
 }
 
 space_update :: proc(s: ^Server, sp: ^Space, dt: f32) {
@@ -729,9 +1070,15 @@ space_update :: proc(s: ^Server, sp: ^Space, dt: f32) {
     i := u32(0)
     for i < sp.projectiles_count {
         p := sp.projectiles[i]
-        np, remove := update_projectile(sp, p, dt)
+        np, outcome, hit_h := update_projectile(sp, p, dt)
 
-        if remove {
+        // Entities are only mutated here, after update_projectile is done
+        // iterating sp.entities. A kill may remove the entity from the map.
+        if outcome == .HitEntity {
+            space_on_projectile_hit(s, sp, np, hit_h)
+        }
+
+        if outcome != .Flying {
             append(&sp.events, game.ProjectileEvent{
                 kind = .REMOVE_PROJECTILE,
                 data = game.RemoveProjectileMsg{projectile_id = np.id},
@@ -768,6 +1115,7 @@ server_update :: proc(s: ^Server, dt: f32) {
 send_space_updates :: proc(s: ^Server, sp: ^Space, now: time.Time, timed_out: ^[dynamic]u32) {
     if sp.player_count == 0 {
         clear(&sp.events)
+        clear(&sp.entity_events)
         return
     }
 
