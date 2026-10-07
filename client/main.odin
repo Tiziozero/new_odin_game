@@ -214,9 +214,9 @@ handle_input :: proc(e: ^InputEvent, s: ^State) {
     #partial switch e.kind {
     case .IE_SCROLL: // no scroll
         {
-            // SCREEN_FACTOR += e.scroll_delta / MOUSE_DELTA
-            // if SCREEN_FACTOR < 1 {SCREEN_FACTOR = 1}
-            // if SCREEN_FACTOR > MAX_ZOOM_FACTOR {SCREEN_FACTOR = MAX_ZOOM_FACTOR}
+            SCREEN_FACTOR += e.scroll_delta / MOUSE_DELTA
+            if SCREEN_FACTOR < 1 {SCREEN_FACTOR = 1}
+            if SCREEN_FACTOR > MAX_ZOOM_FACTOR {SCREEN_FACTOR = MAX_ZOOM_FACTOR}
         }
     case .IE_KEY_PRESSED:
         {

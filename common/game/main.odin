@@ -294,4 +294,5 @@ Projectile :: struct {
     projectile_id : u32, // what kind projectile
     id: u32, // which projectile
     owner: u32,
+    // todo: impl on_hit: proc(target: EntityHandle),
 }

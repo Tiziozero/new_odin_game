@@ -1,16 +1,16 @@
 // server.odin
 package main
 
-import "core:sys/posix"
-import "core:math/rand"
-import "core:math"
-import "core:sync"
-import "core:time"
-import "core:thread"
-import "core:net"
 import "core:fmt"
-import "project:common/game"
+import "core:math"
+import "core:math/rand"
+import "core:net"
+import "core:sync"
+import "core:sys/windows"
+import "core:thread"
+import "core:time"
 import "project:common/buffer_io"
+import "project:common/game"
 import "vendor:raylib"
 
 MIN_ODIN :: "dev-2026-06"
@@ -19,514 +19,813 @@ when ODIN_VERSION < MIN_ODIN {
     // #panic("Requires odin dev-2026-06")
 }
 
-@private
-Client :: struct {
-    entity: game.Entity,
-    energy: f32,
-    max_energy: f32,
-    max_health: f32,
-    attack: f32,
-    last_entity: game.Entity,
-    endpoint: net.Endpoint,
-    last_ping: time.Time,
-    move_to: raylib.Vector2,
-    move_origin: raylib.Vector2,
-    facing: raylib.Vector2,
+PROJECTILES_COUNT :: 1024
+ABILITIES_COUNT   :: game.ABILITIES_COUNT
+MAX_TIMEOUT       :: 10 * time.Second
+NPC_AGGRO_RADIUS  :: 300
+
+// Player entity handles == the client's user_id (the wire format identifies
+// the player's own entity by it). NPC handles are allocated by the server
+// starting here; server_alloc_handle skips anything already in use.
+NPC_HANDLE_BASE :: game.EntityHandle(1 << 31)
+
+// ---------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------
+
+EntityKind :: enum {
+    Player,
+    Npc,
+}
+
+NpcBehavior :: enum {
+    Idle,       // stands still
+    Wander,     // roams around `home`
+    Shopkeeper, // stands still, not targetable, will own shop interaction
+    Hostile,    // chases players inside NPC_AGGRO_RADIUS
+}
+
+NpcData :: struct {
+    behavior:      NpcBehavior,
+    home:          raylib.Vector2,
+    wander_radius: f32,
+    wander_timer:  f32,
+    shop_id:       u32, // for .Shopkeeper, indexes a (future) shop table
+}
+
+// Everything the server knows about one entity. `entity` is the part that
+// is replicated to clients (via deltas); the rest is server-only.
+ServerEntity :: struct {
+    using entity: game.Entity,
+
+    last_sent:        game.Entity, // state as of the last per-tick send, deltas diff against this
+    needs_full_delta: bool,        // freshly added: next delta must carry every field
+
+    kind:       EntityKind,
+    targetable: bool, // projectiles only hit targetable entities
+
+    energy, max_energy, max_health, attack: f32,
+
+    move_to, move_origin, facing: raylib.Vector2,
     abilities: [ABILITIES_COUNT]game.EntityAbility,
 
-    // connection state
-    no_send: bool,
+    npc: NpcData, // only meaningful when kind == .Npc
 }
-PROJECTILES_COUNT :: 1024
-ABILITIES_COUNT :: game.ABILITIES_COUNT
-Ability :: struct {
-    kind: game.AbilityKind,
-    action: AbilityProc,
-}
-error :: distinct struct { error: string, ok: bool };
-AbilityProc :: distinct proc(g: ^Game, c: ^Client, id, level: u32, target: raylib.Vector2) -> error;
 
-@private
-Game :: struct {
-    abilities: map[u32]Ability,
-    entities: map[game.EntityHandle]Client,
-    projectiles: [PROJECTILES_COUNT]game.Projectile, // server_side_projectiles
+// ---------------------------------------------------------------------
+// Spaces: the open world and rooms (dungeons, towns, ...)
+// ---------------------------------------------------------------------
+
+SpaceId :: u32
+OPEN_WORLD_ID :: SpaceId(0)
+
+RoomPurpose :: enum {
+    Dungeon,
+    Town,
+}
+
+OpenWorld :: struct {
+    // chunk streaming / world events etc. go here later
+}
+
+Room :: struct {
+    purpose: RoomPurpose,
+    seed:    u64,
+}
+
+SpaceVariant :: union {
+    OpenWorld,
+    Room,
+}
+
+// A Space owns its map, entities and projectiles. It does NOT own clients
+// (the Server does); players inside a space are just entities with
+// kind == .Player.
+Space :: struct {
+    id:         SpaceId,
+    persistent: bool,
+    variant:    SpaceVariant,
+
+    gmap:     game.Map,
+    entities: map[game.EntityHandle]ServerEntity,
+    player_count: int,
+
+    projectiles:       [PROJECTILES_COUNT]game.Projectile,
     projectiles_count: u32,
 
-    // projectile spawn/remove events accumulated since the last time a
-    // tick's GameData was built; drained (and cleared) every tick.
-    event_lock: sync.Mutex,
-    loop_events: [dynamic]game.ProjectileEvent,
-
-    entities_lock: sync.Mutex,
-    socket: net.UDP_Socket,
-    assets: game.AssetManger,
-    gmap: game.Map,
+    // projectile spawn/remove events since the last per-tick GameData
+    events: [dynamic]game.ProjectileEvent,
 }
 
-game_add_projectile_event :: proc(g: ^Game, ev: game.ProjectileEvent) {
-    sync.lock(&g.event_lock)
-    append(&g.loop_events, ev)
-    sync.unlock(&g.event_lock)
+space_make :: proc(id: SpaceId, persistent: bool, variant: SpaceVariant) -> ^Space {
+    sp := new(Space)
+    sp.id = id
+    sp.persistent = persistent
+    sp.variant = variant
+    sp.gmap = game.new_map()
+    sp.entities = make(map[game.EntityHandle]ServerEntity)
+    sp.events = make([dynamic]game.ProjectileEvent)
+    game.generate_chunck(&sp.gmap, 0, 0) // TODO: per-variant generation (seed, purpose)
+    return sp
 }
 
-game_init :: proc() -> Game {
-    g := Game{}
-    g.assets = game.load_assets("imgs.json");
-    g.gmap = game.new_map();
-    game.generate_chunck(&g.gmap, 0,0);
-    g.entities = make(map[game.EntityHandle]Client);
-    g.abilities = make(map[u32]Ability);
-    g.loop_events = make([dynamic]game.ProjectileEvent);
-    g.abilities[1] = Ability{
-        action=proc(g: ^Game, c: ^Client, id, level: u32, target:raylib.Vector2) -> error {
-            assert(c.entity.id != 0)
-            origin := game.rect_pos(c.entity.body) + 0.5* game.rect_size(c.entity.body);
-            p := game.Projectile {
-                owner=c.entity.id,
-                origin=origin,
-                position=origin,
-                speed=100,
-                range=200,
-                direction=target,
-            };
-            game_spawn_projectile(g, p)
-            return {"", true }
+space_destroy :: proc(sp: ^Space) {
+    delete(sp.entities)
+    delete(sp.events)
+    // TODO: free sp.gmap once game.Map has a destroy proc
+    free(sp)
+}
+
+space_get_entity :: proc(sp: ^Space, h: game.EntityHandle) -> ^ServerEntity {
+    if sp == nil { return nil }
+    if h in sp.entities { return &sp.entities[h] }
+    return nil
+}
+
+// ---------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------
+
+// A connected player's session. The player's entity lives in a Space, found
+// via `space` + EntityHandle(user_id).
+Client :: struct {
+    user_id:   u32,
+    endpoint:  net.Endpoint,
+    last_ping: time.Time,
+    no_send:   bool, // connected but hasn't sent START_GAME yet
+    space:     SpaceId,
+}
+
+error :: distinct struct { error: string, ok: bool }
+AbilityProc :: distinct proc(s: ^Server, sp: ^Space, caster: ^ServerEntity, id, level: u32, target: raylib.Vector2) -> error
+Ability :: struct {
+    kind:   game.AbilityKind,
+    action: AbilityProc,
+}
+
+Server :: struct {
+    // one lock for everything: receiver thread and tick thread both take it
+    lock: sync.Mutex,
+
+    socket:    net.UDP_Socket,
+    assets:    game.AssetManger,
+    abilities: map[u32]Ability,
+
+    clients:      map[u32]Client,
+    entity_index: map[game.EntityHandle]SpaceId, // every entity in every space -> where it lives
+
+    open_world:    ^Space,
+    rooms:         map[SpaceId]^Space,
+    next_space_id: SpaceId,
+
+    next_npc_handle:    game.EntityHandle,
+    next_projectile_id: u32,
+}
+
+server_init :: proc(s: ^Server) {
+    s.assets = game.load_assets("imgs.json")
+    s.abilities = make(map[u32]Ability)
+    s.clients = make(map[u32]Client)
+    s.entity_index = make(map[game.EntityHandle]SpaceId)
+    s.rooms = make(map[SpaceId]^Space)
+    s.next_space_id = OPEN_WORLD_ID + 1
+    s.next_npc_handle = NPC_HANDLE_BASE
+    s.open_world = space_make(OPEN_WORLD_ID, true, OpenWorld{})
+
+    s.abilities[1] = Ability{
+        kind = .Projectile,
+        action = proc(s: ^Server, sp: ^Space, caster: ^ServerEntity, id, level: u32, target: raylib.Vector2) -> error {
+            origin := game.rect_pos(caster.body) + 0.5 * game.rect_size(caster.body)
+            p := game.Projectile{
+                owner     = caster.id,
+                origin    = origin,
+                position  = origin,
+                speed     = 100,
+                range     = 200,
+                direction = target,
+            }
+            if !space_spawn_projectile(s, sp, p) {
+                return {"projectile limit reached", false}
+            }
+            return {"", true}
         },
-    };
-    return g;
+    }
 }
 
-global_projectile_id: u32 = 0
-game_spawn_projectile :: proc(g: ^Game, _p: game.Projectile) {
-    p := _p
-    p.id = global_projectile_id
-    global_projectile_id += 1
+init_server_socket :: proc(s: ^Server) {
+    sock, _ := game.init_udp_socket(port = 8081)
+    s.socket = sock
+}
+
+server_get_space :: proc(s: ^Server, id: SpaceId) -> ^Space {
+    if id == OPEN_WORLD_ID { return s.open_world }
+    if id in s.rooms { return s.rooms[id] }
+    return nil
+}
+
+server_client :: proc(s: ^Server, user_id: u32) -> ^Client {
+    if user_id in s.clients { return &s.clients[user_id] }
+    return nil
+}
+
+// Resolves a user id to (session, space, entity). All nil if unknown.
+server_player :: proc(s: ^Server, user_id: u32) -> (c: ^Client, sp: ^Space, e: ^ServerEntity) {
+    c = server_client(s, user_id)
+    if c == nil { return }
+    sp = server_get_space(s, c.space)
+    e = space_get_entity(sp, game.EntityHandle(user_id))
+    return
+}
+
+random_texture :: proc(s: ^Server) -> u32 {
+    return u32(rand.int31() % i32(len(s.assets.assets)))
+}
+
+// ---------------------------------------------------------------------
+// Entity management
+// ---------------------------------------------------------------------
+
+server_alloc_handle :: proc(s: ^Server) -> game.EntityHandle {
+    for {
+        h := s.next_npc_handle
+        s.next_npc_handle += 1
+        if h != 0 && h not_in s.entity_index {
+            return h
+        }
+    }
+}
+
+server_add_entity :: proc(s: ^Server, sp: ^Space, e: ServerEntity) {
+    ent := e
+    ent.needs_full_delta = true // clients have never seen it: first delta carries everything
+    sp.entities[ent.id] = ent
+    s.entity_index[ent.id] = sp.id
+    if ent.kind == .Player { sp.player_count += 1 }
+}
+
+server_remove_entity :: proc(s: ^Server, sp: ^Space, h: game.EntityHandle) -> (ServerEntity, bool) {
+    e, ok := sp.entities[h]
+    if !ok { return {}, false }
+    delete_key(&sp.entities, h)
+    delete_key(&s.entity_index, h)
+    if e.kind == .Player { sp.player_count -= 1 }
+    return e, true
+}
+
+make_player :: proc(s: ^Server, handle: game.EntityHandle) -> ServerEntity {
+    e := ServerEntity{
+        kind       = .Player,
+        targetable = true,
+        max_health = 100,
+        attack     = 15,
+        entity     = game.Entity{
+            id      = handle,
+            texture = random_texture(s),
+            health  = 100,
+            status  = .ESALIVE,
+            body    = raylib.Rectangle{0, 0, 32, 32},
+        },
+    }
+    e.last_sent = e.entity
+    e.abilities[0] = game.EntityAbility{ability_id = 1, level = 1, active = true}
+    return e
+}
+
+server_spawn_npc :: proc(
+    s: ^Server, sp: ^Space,
+    pos: raylib.Vector2, texture: u32, behavior: NpcBehavior,
+    wander_radius: f32 = 150,
+) -> game.EntityHandle {
+    h := server_alloc_handle(s)
+    e := ServerEntity{
+        kind       = .Npc,
+        targetable = behavior != .Shopkeeper,
+        max_health = 50,
+        move_to    = pos,
+        move_origin = pos,
+        npc = NpcData{behavior = behavior, home = pos, wander_radius = wander_radius},
+        entity = game.Entity{
+            id      = h,
+            texture = texture,
+            health  = 50,
+            status  = .ESALIVE,
+            body    = raylib.Rectangle{pos.x, pos.y, 32, 32},
+        },
+    }
+    e.last_sent = e.entity
+    server_add_entity(s, sp, e)
+    return h
+}
+
+// ---------------------------------------------------------------------
+// Rooms
+// ---------------------------------------------------------------------
+
+server_create_room :: proc(s: ^Server, purpose: RoomPurpose, persistent: bool, seed: u64 = 0) -> ^Space {
+    id := s.next_space_id
+    s.next_space_id += 1
+    sp := space_make(id, persistent, Room{purpose = purpose, seed = seed})
+    s.rooms[id] = sp
+    fmt.println("Created room", id, purpose, "persistent:", persistent)
+    return sp
+}
+
+server_destroy_room :: proc(s: ^Server, sp: ^Space) {
+    for h in sp.entities {
+        delete_key(&s.entity_index, h)
+    }
+    delete_key(&s.rooms, sp.id)
+    fmt.println("Destroyed room", sp.id)
+    space_destroy(sp)
+}
+
+// Frees temporary rooms once the last player has left. Never touches the
+// open world or persistent rooms.
+server_maybe_free_room :: proc(s: ^Server, sp: ^Space) {
+    if sp == nil { return }
+    if _, is_room := sp.variant.(Room); !is_room { return }
+    if sp.persistent || sp.player_count > 0 { return }
+    server_destroy_room(s, sp)
+}
+
+// ---------------------------------------------------------------------
+// Clients joining / leaving / moving between spaces
+// ---------------------------------------------------------------------
+
+server_connect_client :: proc(s: ^Server, user_id: u32, endpoint: net.Endpoint) {
+    fmt.println("Connect")
+    fmt.printfln("\taccess token: %d", user_id)
+
+    handle := game.EntityHandle(user_id)
+    if handle == 0 {
+        fmt.println("rejecting connect: user id 0 is reserved")
+        return
+    }
+    if user_id in s.clients {
+        server_remove_client(s, user_id) // reconnect with the same id
+    }
+    if handle in s.entity_index {
+        fmt.println("rejecting connect: id collides with a non-player entity")
+        return
+    }
+
+    s.clients[user_id] = Client{
+        user_id   = user_id,
+        endpoint  = endpoint,
+        last_ping = time.now(),
+        no_send   = true,
+        space     = OPEN_WORLD_ID,
+    }
+    server_add_entity(s, s.open_world, make_player(s, handle))
+    send_full_sync(s, s.open_world, server_client(s, user_id))
+}
+
+server_remove_client :: proc(s: ^Server, user_id: u32) {
+    c := server_client(s, user_id)
+    if c == nil { return }
+    sp := server_get_space(s, c.space)
+    if sp != nil {
+        server_remove_entity(s, sp, game.EntityHandle(user_id))
+        server_maybe_free_room(s, sp)
+    }
+    delete_key(&s.clients, user_id)
+}
+
+// Moves a player into another space (portal, dungeon entrance, town...) and
+// sends them a full sync of it. Nothing triggers this yet - it needs a
+// message (or server-side portal logic) calling it.
+server_transfer_client :: proc(s: ^Server, user_id: u32, dest_id: SpaceId, pos: raylib.Vector2) -> bool {
+    c := server_client(s, user_id)
+    if c == nil { return false }
+    dest := server_get_space(s, dest_id)
+    if dest == nil { return false }
+    if c.space == dest_id { return true }
+    src := server_get_space(s, c.space)
+    if src == nil { return false }
+
+    e, ok := server_remove_entity(s, src, game.EntityHandle(user_id))
+    if !ok { return false }
+    e.body.x = pos.x
+    e.body.y = pos.y
+    e.move_to = pos
+    e.move_origin = pos
+    e.last_sent = e.entity
+    server_add_entity(s, dest, e)
+    c.space = dest_id
+
+    server_maybe_free_room(s, src) // src may be gone after this line
+
+    send_full_sync(s, dest, c)
+    return true
+}
+
+// ---------------------------------------------------------------------
+// Projectiles & abilities
+// ---------------------------------------------------------------------
+
+space_spawn_projectile :: proc(s: ^Server, sp: ^Space, proj: game.Projectile) -> bool {
+    if sp.projectiles_count >= PROJECTILES_COUNT {
+        fmt.println("projectile limit reached in space", sp.id)
+        return false
+    }
+    p := proj
+    p.id = s.next_projectile_id
+    s.next_projectile_id += 1
     p.active = true
 
-    sync.mutex_lock(&g.entities_lock)
-    g.projectiles[g.projectiles_count] = p
-    g.projectiles_count += 1
-    sync.mutex_unlock(&g.entities_lock)
+    sp.projectiles[sp.projectiles_count] = p
+    sp.projectiles_count += 1
 
-    game_add_projectile_event(g, game.ProjectileEvent{
+    append(&sp.events, game.ProjectileEvent{
         kind = .SPAWN_PROJECTILE,
         data = game.SpawnProjectileMsg{projectile = p},
     })
+    return true
 }
 
-init_server_socket :: proc(g: ^Game) {
-    s, _ := game.init_udp_socket(port=8081);
-    g.socket = s;
+// Hook for damage / knockback / on-hit effects.
+space_on_projectile_hit :: proc(sp: ^Space, p: game.Projectile, target: ^ServerEntity) {
+    // TODO: look up the owner in sp.entities, apply damage to target.health, handle death.
+}
+
+cast_ability :: proc(s: ^Server, sp: ^Space, caster: ^ServerEntity, index: u8, target: raylib.Vector2) {
+    if index >= ABILITIES_COUNT {
+        fmt.printfln("Ability index out of range: %d of %d.", index, ABILITIES_COUNT)
+        return
+    }
+    ua := caster.abilities[index]
+    if !ua.active {
+        fmt.println("Ability", index, "is inactive.")
+        return
+    }
+    ability, ok := s.abilities[ua.ability_id]
+    if !ok {
+        fmt.println("Unknown ability id:", ua.ability_id)
+        return
+    }
+    res := ability.action(s, sp, caster, ua.ability_id, ua.level, target)
+    if !res.ok {
+        fmt.println("Ability failed:", res.error)
+    }
 }
 
 // ---------------------------------------------------------------------
 // Incoming messages from clients
 // ---------------------------------------------------------------------
 
-handle_user_msg :: proc(g: ^Game, buf: ^buffer_io.Buffer, endpoint: net.Endpoint) {
+handle_user_msg :: proc(s: ^Server, buf: ^buffer_io.Buffer, endpoint: net.Endpoint) {
     msg := game.unpack_server_message(buf)
+
+    sync.mutex_lock(&s.lock)
+    defer sync.mutex_unlock(&s.lock)
 
     switch msg.kind {
     case .CONNECT:
         d := msg.data.(game.ConnectMsg)
-        id := d.user_id
-        fmt.println("Connect");
-        fmt.printfln("\taccess token: %d", id);
-
-        sync.mutex_lock(&g.entities_lock);
-        c := Client{}
-        c.endpoint = endpoint;
-        c.max_health = 100
-        c.attack = 15
-        t := u32(rand.int31()%i32(len(g.assets.assets)));
-        c.entity = game.Entity{
-            texture=t,
-            health=c.max_health,
-            body= raylib.Rectangle{0,0,32,32},
-            id=id,
-        };
-        c.last_entity = c.entity
-        c.move_to = raylib.Vector2{0,0}
-        c.move_origin = raylib.Vector2{0,0}
-        c.last_ping = time.now();
-        c.abilities[0].active = true;
-        c.abilities[0].ability_id = 1;
-        c.abilities[0].level = 1;
-        c.no_send = true;
-        g.entities[game.EntityHandle(id)] = c;
-        sync.mutex_unlock(&g.entities_lock);
-
-        // Full sync: every entity's full state plus every currently
-        // active projectile, so a freshly-connected client always
-        // starts from a complete, consistent snapshot.
-        data := build_game_data(g, full_sync = true)
-        data.user_data = build_user_data(c)
-
-        b := game.init_send_message()
-        game.pack_server_message(&b, game.Msg{kind = .GAME_DATA, data = data})
-        game.send_message(g.socket, endpoint, &b)
-        free_all(context.temp_allocator)
+        server_connect_client(s, d.user_id, endpoint)
 
     case .START_GAME:
         d := msg.data.(game.StartGameMsg)
-        id := d.user_id;
-        sync.lock(&g.entities_lock);
-        c, ok := g.entities[id];
-        assert(ok);
-        c.no_send = false;
-        g.entities[id] = c;
-        sync.unlock(&g.entities_lock);
-        fmt.println("Starting game for:", id);
+        c := server_client(s, d.user_id)
+        if c == nil {
+            fmt.println("START_GAME from unknown user:", d.user_id)
+            return
+        }
+        c.no_send = false
+        fmt.println("Starting game for:", d.user_id)
 
     case .PING:
         d := msg.data.(game.PingMsg)
-        id := d.user_id
-        ping_id := d.id
-
-        sync.mutex_lock(&g.entities_lock);
-        last, uok := g.entities[game.EntityHandle(id)];
-        if !uok {
-            fmt.println(id);
-            panic("User doesn't exist");
+        c := server_client(s, d.user_id)
+        if c == nil {
+            fmt.println("PING from unknown user:", d.user_id)
+            return
         }
-        last.last_ping = time.now();
-        g.entities[game.EntityHandle(id)] = last;
-        sync.mutex_unlock(&g.entities_lock);
+        c.last_ping = time.now()
 
         b := game.init_send_message()
         game.pack_server_message(&b, game.Msg{
             kind = .PING_RESPOND,
-            data = game.PingRespondMsg{id = ping_id},
+            data = game.PingRespondMsg{id = d.id},
         })
-        game.send_message(g.socket, endpoint, &b);
+        game.send_message(s.socket, endpoint, &b)
 
     case .USER_MSG:
         d := msg.data.(game.UserMsg)
-        id := d.user_id
+        _, sp, e := server_player(s, d.user_id)
+        if e == nil {
+            fmt.println("USER_MSG from unknown user:", d.user_id)
+            return
+        }
 
         switch v in d.data {
         case game.MoveMsg:
-            sync.lock(&g.entities_lock);
-            last, eok := g.entities[id]
-            assert(eok);
-            last.move_to.x = v.pos.x
-            last.move_to.y = v.pos.y
-            last.move_origin.x = last.entity.body.x
-            last.move_origin.y = last.entity.body.y
-            g.entities[id] = last;
-            sync.unlock(&g.entities_lock);
+            e.move_to.x = v.pos.x
+            e.move_to.y = v.pos.y
+            e.move_origin.x = e.body.x
+            e.move_origin.y = e.body.y
 
         case game.AbilityMsg:
-            cast_ability(g, id, v.user_ability_index, v.direction);
+            cast_ability(s, sp, e, v.user_ability_index, v.direction)
 
         case game.DirectionMsg:
-            sync.lock(&g.entities_lock);
-            last, eok := g.entities[id]
-            assert(eok);
-            last.facing = v.direction;
-            g.entities[id] = last;
-            sync.unlock(&g.entities_lock);
+            e.facing = v.direction
         }
 
     case .GET_STATE:
         // no payload / not currently used
 
     case .Invalid, .GAME_DATA, .GAME_MSG, .PING_RESPOND:
-        panic("Server received an invalid or server-only message")
+        fmt.println("Server received an invalid or server-only message")
     }
 }
 
-gpid :u32= 0
-add_projectile :: proc(g: ^Game, i: game.Projectile) {
-    p := i
-    sync.lock(&g.entities_lock);
-    defer sync.unlock(&g.entities_lock);
-    assert(g.projectiles_count < PROJECTILES_COUNT);
-    p.active = true
-    p.id = gpid
-    gpid += 1;
-    g.projectiles[g.projectiles_count] = p
-    g.projectiles_count += 1;
-}
-
-cast_ability :: proc(g: ^Game, id: u32, index: u8, target: raylib.Vector2) {
-    if index >= ABILITIES_COUNT {
-        fmt.panicf("Ability index out of range: %d of %d.\n", index, ABILITIES_COUNT)
+handle_receiver_loop :: proc(s: ^Server) {
+    buf := buffer_io.buffer_make(1024)
+    for {
+        n, endpoint, err := net.recv_udp(s.socket, buf.data[:])
+        if err != .None {
+            fmt.println(err)
+            panic("recevied error")
+        }
+        if n == 0 {
+            panic("Received 0 bytes?")
+        }
+        buf.len = n
+        handle_user_msg(s, &buf, endpoint)
+        free_all(context.temp_allocator)
+        buffer_io.buffer_reset(&buf)
     }
-    sync.lock(&g.entities_lock)
-    e, ok := g.entities[id];
-    if !ok {
-        fmt.println("entity:", id);
-        panic("Failed to get entity from game.")
-    }
-    sync.unlock(&g.entities_lock)
-    user_ability := e.abilities[index]
-    if ! user_ability.active {
-        fmt.println("Ability", index, "is inactive.");
-        return
-    }
-    ability_id := user_ability.ability_id;
-    ability, aok := g.abilities[ability_id]; assert(aok);
-    ability.action(g, &e, ability_id, user_ability.level, target)
 }
 
 // ---------------------------------------------------------------------
-// GameData construction (used for both per-tick sends and the CONNECT
-// full-sync send)
+// GameData construction (per tick, and full syncs on connect / transfer)
 // ---------------------------------------------------------------------
 
-build_user_data :: proc(c: Client) -> game.UserData {
+build_user_data :: proc(e: ^ServerEntity) -> game.UserData {
     u := game.UserData{}
-    u.energy = c.energy
+    u.energy = e.energy
     for i in 0 ..< ABILITIES_COUNT {
-        a := c.abilities[i]
+        a := e.abilities[i]
         u.abilities[i].active     = 1 if a.active else 0
         u.abilities[i].ability_id = a.ability_id
         u.abilities[i].level      = a.level
         u.abilities[i].cooldown   = a.cooldown
     }
-    u.move_to = c.move_to
+    u.move_to = e.move_to
     return u
 }
 
-// Allocates its result slices with context.temp_allocator - callers
-// must free_all(context.temp_allocator) once they're done sending it.
-build_game_data :: proc(g: ^Game, full_sync: bool) -> game.GameData {
+// Allocates its result slices with context.temp_allocator - callers must
+// free_all(context.temp_allocator) once they're done sending it.
+//
+// Per-tick (non-full) builds advance each entity's `last_sent` and drain the
+// space's projectile events, so call it exactly once per space per send.
+build_game_data :: proc(sp: ^Space, full_sync: bool) -> game.GameData {
     data := game.GameData{full_sync = full_sync}
 
-    sync.mutex_lock(&g.entities_lock)
-    entities := make([dynamic]game.EntityUpdate, 0, len(g.entities), context.temp_allocator)
-    for k, e in g.entities {
-        delta := game.get_entity_delta(e.last_entity, e.entity, all = full_sync)
-        append(&entities, game.EntityUpdate{id = u32(k), delta = delta})
+    entities := make([dynamic]game.EntityUpdate, 0, len(sp.entities), context.temp_allocator)
+    for h, &e in sp.entities {
+        all := full_sync || e.needs_full_delta
+        delta := game.get_entity_delta(e.last_sent, e.entity, all = all)
+        if !full_sync {
+            e.last_sent = e.entity
+            e.needs_full_delta = false
+        }
+        append(&entities, game.EntityUpdate{id = u32(h), delta = delta})
     }
-
-    if full_sync {
-        full := make([]game.Projectile, g.projectiles_count, context.temp_allocator)
-        copy(full, g.projectiles[:g.projectiles_count])
-        data.full_projectiles = full
-    }
-    sync.mutex_unlock(&g.entities_lock)
     data.entities = entities[:]
 
-    if !full_sync {
-        sync.lock(&g.event_lock)
-        events := make([]game.ProjectileEvent, len(g.loop_events), context.temp_allocator)
-        copy(events, g.loop_events[:])
-        clear(&g.loop_events)
-        sync.unlock(&g.event_lock)
+    if full_sync {
+        full := make([]game.Projectile, sp.projectiles_count, context.temp_allocator)
+        copy(full, sp.projectiles[:sp.projectiles_count])
+        data.full_projectiles = full
+    } else {
+        events := make([]game.ProjectileEvent, len(sp.events), context.temp_allocator)
+        copy(events, sp.events[:])
+        clear(&sp.events)
         data.projectile_events = events
     }
-
     return data
+}
+
+// Complete, consistent snapshot of a space for one client.
+send_full_sync :: proc(s: ^Server, sp: ^Space, c: ^Client) {
+    data := build_game_data(sp, full_sync = true)
+    if e := space_get_entity(sp, game.EntityHandle(c.user_id)); e != nil {
+        data.user_data = build_user_data(e)
+    }
+    b := game.init_send_message()
+    game.pack_server_message(&b, game.Msg{kind = .GAME_DATA, data = data})
+    game.send_message(s.socket, c.endpoint, &b)
 }
 
 // ---------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------
 
-handle_receiver_loop :: proc(g: ^Game) {
-    buf := buffer_io.buffer_make(1024);
-    for {
-        n, endpoint, err := net.recv_udp(g.socket, buf.data[:]);
-        if err != .None {
-            fmt.println(err)
-            panic("recevied error");
-        }
-        if n == 0 {
-            panic("Received 0 bytes?");
-        }
-        buf.len = n;
-        handle_user_msg(g, &buf, endpoint);
-        free_all(context.temp_allocator)
-        buffer_io.buffer_reset(&buf);
-    }
+p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
+    return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
 }
 
-update_client :: proc(g: ^Game, c: ^Client, dt: f32) {
-    last_current_entity := c.entity;
-    current_pos := game.rect_pos(c.entity.body)
-    d := raylib.Vector2Normalize(c.move_to - current_pos)
-    assert(raylib.Vector2Length(d) <= 1.01)
+// Shared by players and NPCs: walk towards move_to, then resolve wall collisions.
+entity_update_movement :: proc(sp: ^Space, e: ^ServerEntity, dt: f32) {
+    current_pos := game.rect_pos(e.body)
+    d := raylib.Vector2Normalize(e.move_to - current_pos)
     mag := game.ENTITY_SPEED * dt
     next_pos := current_pos + d * mag
 
-    reached := raylib.Vector2Distance(current_pos, c.move_to) <=
+    reached := raylib.Vector2Distance(current_pos, e.move_to) <=
                raylib.Vector2Distance(current_pos, next_pos)
 
-    target := c.move_to if reached else next_pos
+    target := e.move_to if reached else next_pos
+    e.body.x = target.x
+    e.body.y = target.y
 
-    c.entity.body.x = target.x
-    c.entity.body.y = target.y
-    i := 0
-    for i < 3 { // 3 iterations because collision checks one wall at a time,
-                // so if the entity's colliding against two perpendiculat walls,
-                // only one's checked at a time
-        if  v, ok := game.check_entity_map_collisions(&g.gmap, c.entity); ok {
-            dist := raylib.Vector2Distance(current_pos, v) < 0.25
-            if  dist {
-                c.move_to = v;
+    // 3 iterations because collision checks one wall at a time, so if the
+    // entity's colliding against two perpendicular walls only one is
+    // resolved per pass. Anything left over gets resolved next tick.
+    for _ in 0 ..< 3 {
+        v, hit := game.check_entity_map_collisions(&sp.gmap, e.entity)
+        if !hit { break }
+        if raylib.Vector2Distance(current_pos, v) < 0.25 {
+            e.move_to = v
+        }
+        e.body.x = v.x
+        e.body.y = v.y
+    }
+
+    if e.body.width <= 1 || e.body.height <= 1 {
+        fmt.println(e^)
+        panic("body size too small")
+    }
+}
+
+npc_update :: proc(sp: ^Space, e: ^ServerEntity, dt: f32) {
+    switch e.npc.behavior {
+    case .Idle, .Shopkeeper:
+        // stand still
+
+    case .Wander:
+        e.npc.wander_timer -= dt
+        if e.npc.wander_timer <= 0 {
+            e.npc.wander_timer = 2 + rand.float32() * 4
+            angle := rand.float32() * math.TAU
+            dist  := rand.float32() * e.npc.wander_radius
+            e.move_to = e.npc.home + raylib.Vector2{math.cos(angle), math.sin(angle)} * dist
+            e.move_origin = game.rect_pos(e.body)
+        }
+
+    case .Hostile:
+        pos := game.rect_pos(e.body)
+        best := f32(NPC_AGGRO_RADIUS)
+        found := false
+        for _, &other in sp.entities {
+            if other.kind != .Player { continue }
+            dist := raylib.Vector2Distance(pos, game.rect_pos(other.body))
+            if dist < best {
+                best = dist
+                e.move_to = game.rect_pos(other.body)
+                found = true
             }
-            c.entity.body.x = v.x
-            c.entity.body.y = v.y
-        } else {
-            break
         }
-        i+=1
-    }
-    if i == 3 {
-        panic("Had to check 3 times for collisions");
-    }
-    c.last_entity = last_current_entity
-    if c.entity.body.width <= 1 || c.entity.body.height <= 1 {
-        fmt.println(c)
-        panic("body size too small");
+        if !found { e.move_to = pos } // lost target: stop
+        // TODO: attack when in range
     }
 }
 
-MAX_TIMEOUT :: 10 * time.Second
-
-snapshot_entry :: struct {
-    k: game.EntityHandle,
-    using c: Client,
-}
-
-p_in_rect :: proc(r: raylib.Rectangle, p: raylib.Vector2) -> bool {
-    if p.x >= r.x && p.x <= r.x+r.width {
-        if p.y >= r.y && p.y <= r.y+r.height { return true }
-    }
-    return false
-}
-
-// Returns the projectile's (possibly updated) state and whether it
-// should be removed. When remove is true, the returned projectile's
-// `id` is still valid - callers need it to emit a REMOVE_PROJECTILE
-// event.
-update_projectile :: proc(g: ^Game, last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
+// Returns the projectile's (possibly updated) state and whether it should be
+// removed. When remove is true the returned projectile's `id` is still valid -
+// the caller needs it to emit a REMOVE_PROJECTILE event.
+update_projectile :: proc(sp: ^Space, last_p: game.Projectile, dt: f32) -> (game.Projectile, bool) {
     p := last_p
-    pspeed := last_p.speed
-    prev_pos := last_p.position
-    new_pos := prev_pos + raylib.Vector2Normalize(last_p.direction) * pspeed * dt
-    p.position = new_pos
+    p.position = last_p.position + raylib.Vector2Normalize(last_p.direction) * last_p.speed * dt
 
-    for _, e in g.entities {
-        if e.entity.id == last_p.owner {
-            continue
-        }
-        if p_in_rect(e.entity.body, p.position) {
-            return p, true // hit
+    for h, &e in sp.entities {
+        if h == last_p.owner || !e.targetable { continue }
+        if p_in_rect(e.body, p.position) {
+            space_on_projectile_hit(sp, p, &e)
+            return p, true // hit entity
         }
     }
 
-    if game.check_point_map_collisions(&g.gmap, p.position) {
-        
+    if game.check_point_map_collisions(&sp.gmap, p.position) {
         return p, true // hit wall
     }
-
     if raylib.Vector2Distance(p.position, last_p.origin) > p.range {
         return p, true // out of range
     }
     return p, false
 }
 
-update_game :: proc(g: ^Game, dt: f32) {
-    sync.mutex_lock(&g.entities_lock);
-    for k, e in g.entities {
-        c := e;
-        update_client(g, &c, dt);
-        g.entities[k] = c;
+space_update :: proc(s: ^Server, sp: ^Space, dt: f32) {
+    for _, &e in sp.entities {
+        if e.kind == .Npc {
+            npc_update(sp, &e, dt)
+        }
+        entity_update_movement(sp, &e, dt)
     }
 
     i := u32(0)
-    for i < g.projectiles_count {
-        p := g.projectiles[i]
-        np, remove := update_projectile(g, p, dt)
+    for i < sp.projectiles_count {
+        p := sp.projectiles[i]
+        np, remove := update_projectile(sp, p, dt)
 
         if remove {
-            game_add_projectile_event(g, game.ProjectileEvent{
+            append(&sp.events, game.ProjectileEvent{
                 kind = .REMOVE_PROJECTILE,
                 data = game.RemoveProjectileMsg{projectile_id = np.id},
             })
-
-            last := g.projectiles_count - 1
-            g.projectiles[i] = g.projectiles[last]
-            g.projectiles_count -= 1
-            // don't increment i - the projectile swapped into this slot
-            // still needs to be processed
+            last := sp.projectiles_count - 1
+            sp.projectiles[i] = sp.projectiles[last]
+            sp.projectiles_count -= 1
+            // don't increment i - the projectile swapped into this slot still needs processing
             continue
         }
 
-        g.projectiles[i] = np
+        sp.projectiles[i] = np
         i += 1
     }
-    sync.mutex_unlock(&g.entities_lock);
 }
 
-send_game_data :: proc(
-    g: ^Game,
-    endpoints: ^[dynamic]snapshot_entry,
-    to_remove: ^[dynamic]game.EntityHandle,
-) {
-    shared := build_game_data(g, full_sync = false)
+server_update :: proc(s: ^Server, dt: f32) {
+    sync.mutex_lock(&s.lock)
+    defer sync.mutex_unlock(&s.lock)
 
-    sync.lock(&g.entities_lock);
-    for k, e in g.entities {
-        append(endpoints, snapshot_entry{k, e})
-    }
-    sync.unlock(&g.entities_lock);
-
-    last := time.now()
-    for k in endpoints {
-        if k.no_send {
-            continue;
+    // the open world always simulates; rooms only while somebody is inside
+    space_update(s, s.open_world, dt)
+    for _, sp in s.rooms {
+        if sp.player_count > 0 {
+            space_update(s, sp, dt)
         }
+    }
+}
 
-        elapsed := math.abs(time.diff(last, k.last_ping));
-        if elapsed > MAX_TIMEOUT {
-            append(to_remove, k.k)
+// ---------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------
+
+send_space_updates :: proc(s: ^Server, sp: ^Space, now: time.Time, timed_out: ^[dynamic]u32) {
+    if sp.player_count == 0 {
+        clear(&sp.events)
+        return
+    }
+
+    shared := build_game_data(sp, full_sync = false)
+
+    for uid, &c in s.clients {
+        if c.space != sp.id || c.no_send { continue }
+
+        if time.diff(c.last_ping, now) > MAX_TIMEOUT {
+            append(timed_out, uid)
             continue
         }
 
+        e := space_get_entity(sp, game.EntityHandle(uid))
+        if e == nil { continue }
+
         data := shared
-        data.user_data = build_user_data(k.c)
+        data.user_data = build_user_data(e)
 
         b := game.init_send_message()
         game.pack_server_message(&b, game.Msg{kind = .GAME_DATA, data = data})
-
-        err := game.send_message(g.socket, k.endpoint, &b)
-        if err != .None {
-            panic("err in sending to client");
+        if err := game.send_message(s.socket, c.endpoint, &b); err != .None {
+            fmt.println("error sending to client", uid, err)
         }
     }
-
-    if len(to_remove) > 0 {
-        sync.mutex_lock(&g.entities_lock);
-        for k in to_remove {
-            fmt.println("Removing:", k, "from", len(g.entities), "entities");
-            delete_key(&g.entities,k);
-        }
-        clear_dynamic_array(to_remove);
-        sync.mutex_unlock(&g.entities_lock);
-    }
-    clear_dynamic_array(endpoints)
 }
 
-// server tick: [simulate] -> every 3rd tick, [send GameData to everyone]
-handle_sender_loop :: proc(g: ^Game) {
+server_send_updates :: proc(s: ^Server) {
+    sync.mutex_lock(&s.lock)
+    defer sync.mutex_unlock(&s.lock)
+
+    now := time.now()
+    timed_out := make([dynamic]u32, context.temp_allocator)
+
+    send_space_updates(s, s.open_world, now, &timed_out)
+    for _, sp in s.rooms {
+        send_space_updates(s, sp, now, &timed_out)
+    }
+
+    for uid in timed_out {
+        fmt.println("Removing:", uid, "from", len(s.clients), "clients")
+        server_remove_client(s, uid)
+    }
+}
+
+// server tick: [simulate] -> every 4th tick, [send GameData to everyone]
+handle_sender_loop :: proc(s: ^Server) {
     duration := time.Duration(10) * time.Millisecond
-    to_remove := make([dynamic]game.EntityHandle);
-    endpoints := make([dynamic]snapshot_entry);
-    dt : f32 = 0;
-    i := 0;
+    dt: f32 = 0
+    i := 0
     for {
         start := time.now()
-        update_game(g, dt)
+        server_update(s, dt)
         if i < 3 {
-            i+=1
+            i += 1
         } else {
             i = 0
-            send_game_data(g, &endpoints, &to_remove)
+            server_send_updates(s)
         }
         free_all(context.temp_allocator)
 
@@ -534,33 +833,47 @@ handle_sender_loop :: proc(g: ^Game) {
         if elapsed < duration {
             time.sleep(duration - elapsed)
         }
-        dt_elapsed := time.since(start)
-        dt = f32(dt_elapsed)/f32(time.Second)
+        dt = f32(time.since(start)) / f32(time.Second)
     }
 }
 
 thread_receiver_fn :: proc(data: rawptr) {
-    handle_receiver_loop(transmute(^Game)data);
+    handle_receiver_loop((^Server)(data))
 }
 thread_sender_fn :: proc(data: rawptr) {
-    handle_sender_loop(transmute(^Game)data);
+    handle_sender_loop((^Server)(data))
 }
 
-import "core:sys/windows"
+// ---------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------
+
+// Temporary: some NPCs so there's something to look at.
+server_seed_world :: proc(s: ^Server) {
+    ow := s.open_world
+    server_spawn_npc(s, ow, {200, 200}, random_texture(s), .Shopkeeper)
+    server_spawn_npc(s, ow, {300, 150}, random_texture(s), .Wander)
+    server_spawn_npc(s, ow, {100, 300}, random_texture(s), .Wander)
+    // server_create_room(s, .Town, persistent = true)
+}
+
 main :: proc() {
-    g := game_init()
-    init_server_socket(&g)
+    s := new(Server)
+    server_init(s)
+    init_server_socket(s)
+    server_seed_world(s)
+
     when ODIN_OS == .Windows {
         SIO_UDP_CONNRESET :: 0x9800000C
         bNewBehavior: windows.BOOL = false
         bytesReturned: u32
-        if windows.WSAIoctl(cast(windows.SOCKET)g.socket, windows.SIO_UDP_CONNRESET,
+        if windows.WSAIoctl(cast(windows.SOCKET)s.socket, windows.SIO_UDP_CONNRESET,
             &bNewBehavior,
             size_of(bNewBehavior),
             nil, 0, &bytesReturned,
             nil,
             nil) != 0 {
-            panic("Failed to set SIO_UDP_CONNRESET for windows socket");
+            panic("Failed to set SIO_UDP_CONNRESET for windows socket")
         }
         fmt.println("Running on Windows.")
     } else when ODIN_OS == .Linux {
@@ -568,12 +881,15 @@ main :: proc() {
     } else {
         fmt.panicf("Running on an unsupported/unidentified OS.\n")
     }
-    t_receiver := thread.create_and_start_with_data(data=&g, fn=thread_receiver_fn);
-    t_sender := thread.create_and_start_with_data(data=&g, fn=thread_sender_fn);
+
+    t_receiver := thread.create_and_start_with_data(data = s, fn = thread_receiver_fn)
+    t_sender   := thread.create_and_start_with_data(data = s, fn = thread_sender_fn)
 
     thread.join(t_receiver)
     thread.join(t_sender)
-    delete(g.assets.assets);
-    delete(g.entities);
-    net.close(g.socket)
+
+    delete(s.assets.assets)
+    delete(s.clients)
+    delete(s.entity_index)
+    net.close(s.socket)
 }
